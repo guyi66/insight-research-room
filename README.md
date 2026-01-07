@@ -12,7 +12,7 @@
 
 ---
 
-## 📸 运行界面（占位符）
+## 📸 运行界面
   ![分析结果页](screenshot_analysis_result.png)
 
 ---
@@ -84,7 +84,7 @@
 
 ![数据流向图](diagram_data_flow.png)
 
-### 3）模块关系图（占位符）
+### 3）模块关系图
 
 ![模块关系图](diagram_modules.png)
 
