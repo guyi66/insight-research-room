@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+.venv311/
+venv/
+ENV/
+
+# 环境变量文件（包含API密钥）
+.env
+MindSpider/.env
+*.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 日志文件
+logs/*.log
+*.log
+
+# 数据文件
+data/
+output/
+reports/
+charts/
+tmp/
+
+# 数据库
+*.db
+*.sqlite
+*.sqlite3
+
+# 临时文件
+pasted*.txt
+新建*.txt
+*.tmp
+
+# 模型文件（太大）
+SentimentAnalysisModel/*/checkpoint-*/
+SentimentAnalysisModel/*/runs/
+SentimentAnalysisModel/*/dataset/*.csv
+
+# 缓存
+.cache/
+*.cache

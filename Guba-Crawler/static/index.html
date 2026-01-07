@@ -1,0 +1,1623 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>爬虫任务调度系统</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/element-plus/dist/index.full.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/element-plus@2.4.4/dist/index.css" onerror="this.href='https://cdn.jsdelivr.net/npm/element-plus@2.4.4/dist/index.css'">
+    <style>
+        body {
+            margin: 0;
+            font-family: 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;
+        }
+        .header {
+            background: linear-gradient(90deg, #409EFF 0%, #67C23A 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .status-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .status-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+            border-left: 4px solid #409EFF;
+        }
+        .status-card.running {
+            border-left-color: #67C23A;
+        }
+        .status-card.warning {
+            border-left-color: #E6A23C;
+        }
+        .status-card.danger {
+            border-left-color: #F56C6C;
+        }
+        .card-title {
+            font-size: 14px;
+            color: #909399;
+            margin-bottom: 10px;
+        }
+        .card-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #303133;
+        }
+        .tabs-container {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        .config-form {
+            max-width: 800px;
+        }
+        .json-editor {
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+        }
+        .progress-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .task-status {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .status-pending { background: #E1F3D8; color: #67C23A; }
+        .status-running { background: #D1ECF1; color: #409EFF; }
+        .status-completed { background: #D4EDDA; color: #28A745; }
+        .status-failed { background: #F8D7DA; color: #DC3545; }
+        .status-cancelled { background: #F3F4F6; color: #6C757D; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="header">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <h1>🕷️ 爬虫任务调度系统</h1>
+                    <p>ShengHao  V.2.1</p>
+                </div>
+                <div style="display: flex; align-items: center; gap: 15px;">
+                    <span style="color: rgba(255,255,255,0.9); font-size: 14px;">
+                        欢迎，{{ currentUser }}
+                    </span>
+                    <el-button 
+                        type="danger" 
+                        size="small" 
+                        @click="logout"
+                        style="background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3); color: white;"
+                    >
+                        退出登录
+                    </el-button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="container">
+            <!-- 主要内容区域 - 置顶 -->
+            <div class="tabs-container" style="margin-bottom: 30px;">
+                <el-tabs v-model="activeTab" @tab-click="handleTabClick" type="border-card">
+                    <el-tab-pane label="📋 任务配置" name="configs"></el-tab-pane>
+                    <el-tab-pane label="⏳ 任务队列" name="queue"></el-tab-pane>
+                    <el-tab-pane label="📊 执行历史" name="history"></el-tab-pane>
+                </el-tabs>
+            </div>
+            
+            <!-- 系统状态卡片 -->
+            <div class="status-cards">
+                <div class="status-card" :class="{ running: systemStatus.scheduler_running }">
+                    <div class="card-title">调度器状态</div>
+                    <div class="card-value">
+                        {{ systemStatus.scheduler_running ? '运行中' : '已停止' }}
+                        <el-button 
+                            :type="systemStatus.scheduler_running ? 'danger' : 'success'"
+                            size="small" 
+                            @click="toggleScheduler"
+                            style="margin-left: 10px;"
+                        >
+                            {{ systemStatus.scheduler_running ? '停止' : '启动' }}
+                        </el-button>
+                    </div>
+                </div>
+                
+                <div class="status-card">
+                    <div class="card-title">当前任务</div>
+                    <div class="card-value">
+                        {{ systemStatus.current_task ? systemStatus.current_task.task_name : '无' }}
+                    </div>
+                    <div v-if="systemStatus.current_task" style="font-size: 12px; color: #909399; margin-top: 5px;">
+                        运行时间: {{ formatDuration(systemStatus.current_task.duration_seconds) }}
+                    </div>
+                </div>
+                
+                <div class="status-card">
+                    <div class="card-title">排队任务</div>
+                    <div class="card-value">{{ (systemStatus.queue_stats && systemStatus.queue_stats.pending) || 0 }}</div>
+                </div>
+                
+                <div class="status-card">
+                    <div class="card-title">今日完成</div>
+                    <div class="card-value">{{ (systemStatus.today_stats && systemStatus.today_stats.completed) || 0 }}</div>
+                </div>
+                
+                <div class="status-card" :class="{ running: fullTextStatus.is_running }">
+                    <div class="card-title">全文爬取器</div>
+                    <div class="card-value">
+                        {{ fullTextStatus.is_running ? '运行中' : '已停止' }}
+                        <el-button 
+                            :type="fullTextStatus.is_running ? 'danger' : 'success'"
+                            size="small" 
+                            @click="toggleFullTextCrawler"
+                            style="margin-left: 10px;"
+                        >
+                            {{ fullTextStatus.is_running ? '停止' : '启动' }}
+                        </el-button>
+                    </div>
+                    <div style="font-size: 12px; color: #909399; margin-top: 5px;">
+                        队列: {{ fullTextStatus.queue_count || 0 }} | 进度: {{ fullTextStatus.progress || '0.0' }}% | 线程数: 8 
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 标签页内容区域 -->
+            <div class="tabs-container">
+                <!-- 任务配置内容 -->
+                <div v-show="activeTab === 'configs'">
+                        <!-- 文件夹管理区域 -->
+                        <div style="margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                                <h4 style="margin: 0; color: #409EFF;">📁 文件夹管理</h4>
+                                <el-button size="small" type="success" @click="openCreateFolderDialog">
+                                    <el-icon><FolderAdd /></el-icon>
+                                    新建文件夹
+                                </el-button>
+                            </div>
+                            <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                                <el-tag 
+                                    v-for="folder in taskFolders" 
+                                    :key="folder.id"
+                                    :type="selectedFolder === folder.id ? 'primary' : 'info'"
+                                    :effect="selectedFolder === folder.id ? 'dark' : 'light'"
+                                    @click="selectFolder(folder.id)"
+                                    @close="deleteFolder(folder.id)"
+                                    closable
+                                    style="cursor: pointer; padding: 8px 12px; font-size: 13px;"
+                                >
+                                    📁 {{ folder.name }} ({{ getFolderTaskCount(folder.id) }})
+                                </el-tag>
+                                <el-tag 
+                                    :type="selectedFolder === null ? 'primary' : 'info'"
+                                    :effect="selectedFolder === null ? 'dark' : 'light'"
+                                    @click="selectFolder(null)"
+                                    style="cursor: pointer; padding: 8px 12px; font-size: 13px;"
+                                >
+                                    📋 全部任务 ({{ taskConfigs.length }})
+                                </el-tag>
+                            </div>
+                        </div>
+                        
+                        <div style="margin-bottom: 20px;">
+                            <el-button type="primary" @click="showCreateConfigDialog = true">
+                                <el-icon><Plus /></el-icon>
+                                新建任务配置
+                            </el-button>
+                            <el-button @click="loadTaskConfigs">
+                                <el-icon><Refresh /></el-icon>
+                                刷新
+                            </el-button>
+                            <el-button @click="autoClassifyTasks" type="warning" size="small">
+                                <el-icon><Magic /></el-icon>
+                                自动归类任务
+                            </el-button>
+                        </div>
+                        
+                        <el-table :data="filteredTaskConfigs" style="width: 100%" v-loading="loading.configs">
+                            <el-table-column prop="id" label="ID" width="80"></el-table-column>
+                            <el-table-column prop="task_name" label="任务名称" width="200"></el-table-column>
+                            <el-table-column label="文件夹" width="120">
+                                <template #default="scope">
+                                    <el-tag v-if="scope.row.folder_id" size="small" type="info">
+                                        📁 {{ getFolderName(scope.row.folder_id) }}
+                                    </el-tag>
+                                    <span v-else style="color: #909399; font-size: 12px;">未分类</span>
+                                </template>
+                            </el-table-column>
+                            <el-table-column prop="description" label="描述" show-overflow-tooltip></el-table-column>
+                            <el-table-column prop="crawler_type" label="类型" width="120">
+                                <template #default="scope">
+                                    <el-tag :type="getCrawlerTypeColor(scope.row.crawler_type)">{{ getCrawlerTypeName(scope.row.crawler_type) }}</el-tag>
+                                </template>
+                            </el-table-column>
+                            <el-table-column prop="priority" label="优先级" width="100"></el-table-column>
+                            <el-table-column prop="is_active" label="状态" width="100">
+                                <template #default="scope">
+                                    <el-tag :type="scope.row.is_active ? 'success' : 'danger'">
+                                        {{ scope.row.is_active ? '启用' : '禁用' }}
+                                    </el-tag>
+                                </template>
+                            </el-table-column>
+                            <el-table-column label="操作" width="320">
+                                <template #default="scope">
+                                    <el-button size="small" @click="editConfig(scope.row)">编辑</el-button>
+                                    <el-button size="small" type="success" @click="addToQueue(scope.row.id)">加入队列</el-button>
+                                    <el-dropdown size="small" style="margin-left: 5px;">
+                                        <el-button size="small" type="primary">
+                                            移动到 <el-icon><ArrowDown /></el-icon>
+                                        </el-button>
+                                        <template #dropdown>
+                                            <el-dropdown-menu>
+                                                <el-dropdown-item @click="moveTaskToFolder(scope.row.id, null)">未分类</el-dropdown-item>
+                                                <el-dropdown-item 
+                                                    v-for="folder in taskFolders" 
+                                                    :key="folder.id"
+                                                    @click="moveTaskToFolder(scope.row.id, folder.id)"
+                                                >
+                                                    📁 {{ folder.name }}
+                                                </el-dropdown-item>
+                                            </el-dropdown-menu>
+                                        </template>
+                                    </el-dropdown>
+                                    <el-button size="small" type="danger" @click="deleteConfig(scope.row.id)">删除</el-button>
+                                </template>
+                            </el-table-column>
+                        </el-table>
+                </div>
+                
+                <!-- 任务队列内容 -->
+                <div v-show="activeTab === 'queue'">
+                        <div style="margin-bottom: 20px;">
+                            <el-button @click="loadTaskQueue">
+                                <el-icon><Refresh /></el-icon>
+                                刷新队列
+                            </el-button>
+                        </div>
+                        
+                        <el-table :data="taskQueue" style="width: 100%" v-loading="loading.queue">
+                            <el-table-column prop="queue_position" label="位置" width="80"></el-table-column>
+                            <el-table-column prop="task_name" label="任务名称" width="200"></el-table-column>
+                            <el-table-column prop="crawler_type" label="类型" width="120">
+                                <template #default="scope">
+                                    <el-tag :type="getCrawlerTypeColor(scope.row.crawler_type)">{{ getCrawlerTypeName(scope.row.crawler_type) }}</el-tag>
+                                </template>
+                            </el-table-column>
+                            <el-table-column prop="status" label="状态" width="120">
+                                <template #default="scope">
+                                    <span :class="'task-status status-' + scope.row.status">{{ getStatusName(scope.row.status) }}</span>
+                                </template>
+                            </el-table-column>
+                            <el-table-column prop="current_step" label="当前阶段" width="180">
+                                <template #default="scope">
+                                    <span style="font-size: 13px; color: #606266;">{{ scope.row.current_step || '等待执行...' }}</span>
+                                </template>
+                            </el-table-column>
+                            <el-table-column prop="progress_percent" label="进度" width="150">
+                                <template #default="scope">
+                                    <div class="progress-info">
+                                        <el-progress :percentage="parseFloat(scope.row.progress_percent) || 0" :show-text="false" style="flex: 1;"></el-progress>
+                                        <span style="margin-left: 10px; font-size: 12px;">{{ (parseFloat(scope.row.progress_percent) || 0).toFixed(1) }}%</span>
+                                    </div>
+                                </template>
+                            </el-table-column>
+                            <el-table-column prop="created_at" label="入队时间" width="180">
+                                <template #default="scope">
+                                    {{ formatDateTime2(scope.row.created_at) }}
+                                </template>
+                            </el-table-column>
+                            <el-table-column label="操作" width="160">
+                                <template #default="scope">
+                                    <el-button 
+                                        v-if="scope.row.status === 'pending'"
+                                        size="small" 
+                                        type="danger" 
+                                        @click="removeFromQueue(scope.row.id)"
+                                    >
+                                        移除
+                                    </el-button>
+                                    <el-button 
+                                        v-if="scope.row.status === 'running' || scope.row.status === 'completed' || scope.row.status === 'failed'"
+                                        size="small" 
+                                        type="primary" 
+                                        @click="viewTaskLog(scope.row.id)"
+                                    >
+                                        查看日志
+                                    </el-button>
+                                    <span v-if="scope.row.status === 'pending'" style="color: #909399; font-size: 12px; margin-left: 10px;">等待中</span>
+                                </template>
+                            </el-table-column>
+                        </el-table>
+                </div>
+                
+                <!-- 执行历史内容 -->
+                <div v-show="activeTab === 'history'">
+                        <div style="margin-bottom: 20px;">
+                            <el-button @click="loadTaskHistory">
+                                <el-icon><Refresh /></el-icon>
+                                刷新历史
+                            </el-button>
+                        </div>
+                        
+                        <el-table :data="taskHistory.items" style="width: 100%" v-loading="loading.history">
+                            <el-table-column prop="task_name" label="任务名称" width="200"></el-table-column>
+                            <el-table-column prop="crawler_type" label="类型" width="120">
+                                <template #default="scope">
+                                    <el-tag :type="getCrawlerTypeColor(scope.row.crawler_type)">{{ getCrawlerTypeName(scope.row.crawler_type) }}</el-tag>
+                                </template>
+                            </el-table-column>
+                            <el-table-column prop="status" label="状态" width="100">
+                                <template #default="scope">
+                                    <span :class="'task-status status-' + scope.row.status">{{ getStatusName(scope.row.status) }}</span>
+                                </template>
+                            </el-table-column>
+                            <el-table-column prop="duration_seconds" label="耗时" width="100">
+                                <template #default="scope">
+                                    {{ formatDuration(scope.row.duration_seconds) }}
+                                </template>
+                            </el-table-column>
+                            <el-table-column label="执行结果" width="200">
+                                <template #default="scope">
+                                    <div style="font-size: 12px;">
+                                        <div>成功: {{ scope.row.success_count || 0 }}</div>
+                                        <div>失败: {{ scope.row.failed_count || 0 }}</div>
+                                        <div>总计: {{ scope.row.total_count || 0 }}</div>
+                                    </div>
+                                </template>
+                            </el-table-column>
+                            <el-table-column prop="started_at" label="开始时间" width="180">
+                                <template #default="scope">
+                                    {{ formatDateTime(scope.row.started_at) }}
+                                </template>
+                            </el-table-column>
+                            <el-table-column prop="completed_at" label="结束时间" width="180">
+                                <template #default="scope">
+                                    {{ formatDateTime(scope.row.completed_at) }}
+                                </template>
+                            </el-table-column>
+                            <el-table-column label="操作" width="120">
+                                <template #default="scope">
+                                    <el-button 
+                                        size="small" 
+                                        type="primary" 
+                                        @click="viewTaskLog(scope.row.id)"
+                                    >
+                                        查看日志
+                                    </el-button>
+                                </template>
+                            </el-table-column>
+                        </el-table>
+                        
+                        <div style="margin-top: 20px; text-align: center;">
+                            <el-pagination
+                                v-model:current-page="historyPage"
+                                :page-size="historyLimit"
+                                :total="taskHistory.total"
+                                layout="prev, pager, next, total"
+                                @current-change="loadTaskHistory"
+                            ></el-pagination>
+                        </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 创建/编辑任务配置对话框 -->
+        <el-dialog 
+            v-model="showCreateConfigDialog" 
+            :title="editingConfig ? '编辑任务配置' : '创建任务配置'"
+            width="90%"
+            :before-close="handleCloseConfigDialog"
+        >
+            <el-form :model="configForm" label-width="120px" class="config-form">
+                <el-form-item label="任务名称" required>
+                    <el-input v-model="configForm.task_name" placeholder="请输入任务名称"></el-input>
+                </el-form-item>
+                
+                <el-form-item label="任务描述">
+                    <el-input v-model="configForm.description" type="textarea" :rows="2" placeholder="请输入任务描述"></el-input>
+                </el-form-item>
+                
+                <el-form-item label="爬虫类型" required>
+                    <el-select v-model="configForm.crawler_type" placeholder="请选择爬虫类型" @change="onCrawlerTypeChange">
+                        <el-option label="帖子爬取" value="post"></el-option>
+                        <el-option label="评论爬取" value="comment"></el-option>
+                        <el-option label="全文爬取" value="full_text"></el-option>
+                        <el-option label="顺序执行" value="sequential"></el-option>
+                        <el-option label="并行执行" value="parallel"></el-option>
+                    </el-select>
+                </el-form-item>
+                
+                <el-form-item label="优先级">
+                    <el-input-number v-model="configForm.priority" :min="0" :max="100"></el-input-number>
+                </el-form-item>
+                
+                <el-form-item label="启用并行">
+                    <el-switch v-model="configForm.enable_parallelism"></el-switch>
+                    <span style="margin-left: 10px; color: #909399; font-size: 12px;">开启后并行度为2，否则为1</span>
+                </el-form-item>
+                
+                <!-- 配置模式选择 -->
+                <el-form-item label="配置模式">
+                    <el-radio-group v-model="configMode" @change="onConfigModeChange">
+                        <el-radio label="form">表单模式</el-radio>
+                        <el-radio label="json">JSON模式</el-radio>
+                    </el-radio-group>
+                </el-form-item>
+                
+                <!-- 表单模式配置 -->
+                <div v-if="configMode === 'form'">
+                    <el-divider content-position="left">数据库配置</el-divider>
+                    
+                    <!-- MongoDB配置 -->
+                    <el-card shadow="never" style="margin-bottom: 20px;">
+                        <template #header>
+                            <span>MongoDB 配置</span>
+                        </template>
+                        <el-row :gutter="20">
+                            <el-col :span="12">
+                                <el-form-item label="主机地址">
+                                    <el-input v-model="formConfig.MongoDB.host" placeholder="localhost"></el-input>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="12">
+                                <el-form-item label="端口">
+                                    <el-input-number v-model="formConfig.MongoDB.port" :min="1" :max="65535" style="width: 100%;"></el-input-number>
+                                </el-form-item>
+                            </el-col>
+                        </el-row>
+                        <el-row :gutter="20">
+                            <el-col :span="8">
+                                <el-form-item label="用户名">
+                                    <el-input v-model="formConfig.MongoDB.username" placeholder="admin"></el-input>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="8">
+                                <el-form-item label="密码">
+                                    <el-input v-model="formConfig.MongoDB.password" type="password" show-password></el-input>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="8">
+                                <el-form-item label="数据库名">
+                                    <el-input v-model="formConfig.MongoDB.database" placeholder="guba"></el-input>
+                                </el-form-item>
+                            </el-col>
+                        </el-row>
+                    </el-card>
+                    
+                    <!-- Redis配置 -->
+                    <el-card shadow="never" style="margin-bottom: 20px;">
+                        <template #header>
+                            <span>Redis 配置</span>
+                        </template>
+                        <el-row :gutter="20">
+                            <el-col :span="12">
+                                <el-form-item label="主机地址">
+                                    <el-input v-model="formConfig.Redis.redis_host" placeholder="localhost"></el-input>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="12">
+                                <el-form-item label="端口">
+                                    <el-input-number v-model="formConfig.Redis.redis_port" :min="1" :max="65535" style="width: 100%;"></el-input-number>
+                                </el-form-item>
+                            </el-col>
+                        </el-row>
+                        <el-row :gutter="20">
+                            <el-col :span="8">
+                                <el-form-item label="密码">
+                                    <el-input v-model="formConfig.Redis.redis_password" type="password" show-password></el-input>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="8">
+                                <el-form-item label="数据库">
+                                    <el-input-number v-model="formConfig.Redis.redis_db" :min="0" :max="15" style="width: 100%;"></el-input-number>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="8">
+                                <el-form-item label="Redis Key">
+                                    <el-input v-model="formConfig.Redis.redis_key" placeholder="urls"></el-input>
+                                </el-form-item>
+                            </el-col>
+                        </el-row>
+                    </el-card>
+                    
+                    <el-divider content-position="left">爬虫参数配置</el-divider>
+                    
+                    <!-- 主类参数配置 -->
+                    <el-card shadow="never" style="margin-bottom: 20px;">
+                        <template #header>
+                            <span>主类参数</span>
+                        </template>
+                        <el-row :gutter="20">
+                            <el-col :span="8">
+                                <el-form-item label="股票代码">
+                                    <el-input v-model="formConfig.mainClass.secCode" placeholder="zssh000016"></el-input>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="8">
+                                <el-form-item label="集合名称">
+                                    <el-input v-model="formConfig.mainClass.collectionName" placeholder="zssh000016"></el-input>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="8" v-if="needsPagesConfig">
+                                <el-form-item label="开始页">
+                                    <el-input-number v-model="formConfig.mainClass.pages_start" :min="1" placeholder="开始页" style="width: 100%;"></el-input-number>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="8" v-if="needsPagesConfig">
+                                <el-form-item label="结束页">
+                                    <el-input-number v-model="formConfig.mainClass.pages_end" :min="1" placeholder="结束页" style="width: 100%;"></el-input-number>
+                                </el-form-item>
+                            </el-col>
+                        </el-row>
+                    </el-card>
+                    
+                    <!-- 帖子爬虫配置 -->
+                    <el-card shadow="never" style="margin-bottom: 20px;" v-if="needsPostConfig">
+                        <template #header>
+                            <span>帖子爬虫配置</span>
+                        </template>
+                        <el-row :gutter="20">
+                            <el-col :span="8">
+                                <el-form-item label="线程数">
+                                    <el-input-number v-model="formConfig.PostCrawler.thread_num" :min="1" :max="20" style="width: 100%;"></el-input-number>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="8">
+                                <el-form-item label="起始页">
+                                    <el-input-number v-model="formConfig.PostCrawler.start_page" :min="1" style="width: 100%;"></el-input-number>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="8">
+                                <el-form-item label="结束页">
+                                    <el-input-number v-model="formConfig.PostCrawler.end_page" :min="1" style="width: 100%;"></el-input-number>
+                                </el-form-item>
+                            </el-col>
+                        </el-row>
+                    </el-card>
+                    
+                    <!-- 评论爬虫配置 -->
+                    <el-card shadow="never" style="margin-bottom: 20px;" v-if="needsCommentConfig">
+                        <template #header>
+                            <span>评论爬虫配置</span>
+                        </template>
+                        <el-row :gutter="20">
+                            <el-col :span="6">
+                                <el-form-item label="启用">
+                                    <el-switch v-model="formConfig.CommentCrawler.enabled"></el-switch>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="6">
+                                <el-form-item label="无头模式">
+                                    <el-switch v-model="formConfig.CommentCrawler.headless"></el-switch>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="6">
+                                <el-form-item label="等待超时(秒)">
+                                    <el-input-number v-model="formConfig.CommentCrawler.wait_timeout" :min="1" :max="60" style="width: 100%;"></el-input-number>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="6">
+                                <el-form-item label="最大重试">
+                                    <el-input-number v-model="formConfig.CommentCrawler.max_retry" :min="1" :max="10" style="width: 100%;"></el-input-number>
+                                </el-form-item>
+                            </el-col>
+                        </el-row>
+                        <el-row :gutter="20">
+                            <el-col :span="12">
+                                <el-form-item label="开始日期">
+                                    <el-date-picker v-model="formConfig.CommentCrawler.start_date" type="date" placeholder="选择开始日期" style="width: 100%;"></el-date-picker>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="12">
+                                <el-form-item label="结束日期">
+                                    <el-date-picker v-model="formConfig.CommentCrawler.end_date" type="date" placeholder="选择结束日期" style="width: 100%;"></el-date-picker>
+                                </el-form-item>
+                            </el-col>
+                        </el-row>
+                    </el-card>
+                    
+                    <!-- 代理配置 -->
+                    <el-card shadow="never" style="margin-bottom: 20px;">
+                        <template #header>
+                            <span>代理配置 (可选)</span>
+                        </template>
+                        <el-row :gutter="20">
+                            <el-col :span="8">
+                                <el-form-item label="启用代理">
+                                    <el-switch v-model="formConfig.proxies.enabled" @change="onProxyToggle"></el-switch>
+                                </el-form-item>
+                            </el-col>
+                            <el-col :span="16">
+                                <el-form-item label="代理隧道" v-if="formConfig.proxies.enabled">
+                                    <el-input v-model="formConfig.proxies.tunnel" placeholder="i485.kdltpspro.com:15818"></el-input>
+                                </el-form-item>
+                            </el-col>
+                        </el-row>
+                    </el-card>
+                </div>
+                
+                <!-- JSON模式配置 -->
+                <el-form-item v-if="configMode === 'json'" label="配置数据" required>
+                    <el-input 
+                        v-model="configFormJson" 
+                        type="textarea" 
+                        :rows="15" 
+                        placeholder="请输入JSON格式的配置数据"
+                        class="json-editor"
+                    ></el-input>
+                    <div style="margin-top: 10px; font-size: 12px; color: #909399;">
+                        提示：配置数据应包含MongoDB、Redis、爬虫参数等信息
+                    </div>
+                </el-form-item>
+            </el-form>
+            
+            <template #footer>
+                <span class="dialog-footer">
+                    <el-button @click="handleCloseConfigDialog">取消</el-button>
+                    <el-button type="primary" @click="saveConfig">保存</el-button>
+                </span>
+            </template>
+        </el-dialog>
+        
+        <!-- 日志查看对话框 -->
+        <el-dialog 
+            v-model="showLogDialog" 
+            title="任务日志" 
+            width="80%" 
+            :before-close="closeLogDialog"
+        >
+            <div v-loading="logLoading" style="min-height: 400px;">
+                <pre v-if="currentTaskLog" style="background: #f5f5f5; padding: 15px; border-radius: 4px; max-height: 500px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 12px; line-height: 1.4;">{{ currentTaskLog }}</pre>
+                <div v-else-if="!logLoading" style="text-align: center; color: #999; padding: 50px;">
+                    暂无日志数据
+                </div>
+            </div>
+            <template #footer>
+                <span class="dialog-footer">
+                    <el-button @click="closeLogDialog">关闭</el-button>
+                    <el-button type="primary" @click="viewTaskLog(currentTaskId)" :loading="logLoading">刷新日志</el-button>
+                </span>
+            </template>
+        </el-dialog>
+        
+        <!-- 创建文件夹对话框 -->
+        <el-dialog 
+            v-model="showCreateFolderDialog" 
+            title="创建文件夹" 
+            width="400px"
+            :before-close="handleCloseFolderDialog"
+        >
+            <el-form :model="folderForm" label-width="80px">
+                <el-form-item label="文件夹名" required>
+                    <el-input 
+                        v-model="folderForm.name" 
+                        placeholder="请输入文件夹名称（如：上证501）"
+                        maxlength="50"
+                        show-word-limit
+                    ></el-input>
+                    <div style="margin-top: 8px; font-size: 12px; color: #909399;">
+                        💡 提示：任务会根据名称前缀自动归类到对应文件夹
+                    </div>
+                </el-form-item>
+                <el-form-item label="描述">
+                    <el-input 
+                        v-model="folderForm.description" 
+                        type="textarea" 
+                        :rows="2"
+                        placeholder="请输入文件夹描述（可选）"
+                        maxlength="200"
+                        show-word-limit
+                    ></el-input>
+                </el-form-item>
+            </el-form>
+            <template #footer>
+                <span class="dialog-footer">
+                    <el-button @click="handleCloseFolderDialog">取消</el-button>
+                    <el-button type="primary" @click="createFolder" :disabled="!folderForm.name.trim()">创建</el-button>
+                </span>
+            </template>
+        </el-dialog>
+    </div>
+    
+    <script>
+        const { createApp } = Vue;
+        const { ElMessage, ElMessageBox } = ElementPlus;
+        
+        // 设置axios默认配置
+        const token = localStorage.getItem('auth_token') || sessionStorage.getItem('auth_token');
+        if (token) {
+            axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+        } else {
+            // 如果没有token，重定向到登录页面
+            window.location.href = '/static/login.html';
+        }
+        
+        // 添加响应拦截器处理认证错误
+        axios.interceptors.response.use(
+            response => response,
+            error => {
+                if (error.response && error.response.status === 401) {
+                    localStorage.removeItem('auth_token');
+                    sessionStorage.removeItem('auth_token');
+                    ElMessage.error('登录已过期，请重新登录');
+                    setTimeout(() => {
+                        window.location.href = '/static/login.html';
+                    }, 1500);
+                }
+                return Promise.reject(error);
+            }
+        );
+        
+        createApp({
+            data() {
+                return {
+                    currentUser: '',
+                    activeTab: 'configs',
+                    loading: {
+                        configs: false,
+                        queue: false,
+                        history: false
+                    },
+                    systemStatus: {
+                        scheduler_running: false,
+                        current_task: null,
+                        queue_stats: {},
+                        today_stats: {}
+                    },
+                    fullTextStatus: {
+                        is_running: false,
+                        queue_count: 0,
+                        progress: '0.0'
+                    },
+                    taskConfigs: [],
+                    taskQueue: [],
+                    taskHistory: {
+                        items: [],
+                        total: 0
+                    },
+                    historyPage: 1,
+                    historyLimit: 20,
+                    // 文件夹相关数据
+                    taskFolders: [],
+                    selectedFolder: null,
+                    showCreateFolderDialog: false,
+                    folderForm: {
+                        name: '',
+                        description: ''
+                    },
+                    showCreateConfigDialog: false,
+                    editingConfig: null,
+                    configForm: {
+                        task_name: '',
+                        description: '',
+                        crawler_type: '',
+                        priority: 0,
+                        enable_parallelism: false,
+                        config_data: {}
+                    },
+                    configFormJson: '',
+                    configMode: 'form', // 'form' 或 'json'
+                    showLogDialog: false,
+                    currentTaskLog: '',
+                    currentTaskId: null,
+                    logLoading: false,
+                    formConfig: {
+                        MongoDB: {
+                            host: 'localhost',
+                            port: 27017,
+                            username: 'admin',
+                            password: 'aa20020320',
+                            database: 'guba'
+                        },
+                        Redis: {
+                            redis_host: 'localhost',
+                            redis_port: 6379,
+                            redis_password: '123456',
+                            redis_db: 0,
+                            redis_key: 'urls'
+                        },
+                        mainClass: {
+                            secCode: 'zssh000016',
+                            collectionName: 'zssh000016',
+                            pages_start: 1,
+                            pages_end: 10
+                        },
+                        PostCrawler: {
+                            thread_num: 4,
+                            start_page: 1,
+                            end_page: 10
+                        },
+                        CommentCrawler: {
+                            enabled: true,
+                            headless: false,
+                            wait_timeout: 10,
+                            max_retry: 3,
+                            start_date: '',
+                            end_date: ''
+                        },
+                        proxies: {
+                            enabled: false,
+                            tunnel: ''
+                        }
+                     },
+                     defaultConfigs: {
+                        post: {
+                            MongoDB: {
+                                host: 'localhost',
+                                port: 27017,
+                                username: 'admin',
+                                password: 'aa20020320',
+                                database: 'guba'
+                            },
+                            Redis: {
+                                redis_host: 'localhost',
+                                redis_port: 6379,
+                                redis_password: '123456',
+                                redis_db: 0,
+                                redis_key: 'urls'
+                            },
+                            mainClass: {
+                                pages_start: 1,
+                                pages_end: 10,
+                                secCode: 'zssh000016',
+                                collectionName: 'zssh000016'
+                            },
+                            PostCrawler: {
+                                thread_num: 4,
+                                start_page: 1,
+                                end_page: 10
+                            },
+                            proxies: {
+                                enabled: true,
+                                tunnel: 'i485.kdltpspro.com:15818'
+                            }
+                        },
+                        comment: {
+                            MongoDB: {
+                                host: 'localhost',
+                                port: 27017,
+                                username: 'admin',
+                                password: 'aa20020320',
+                                database: 'guba'
+                            },
+                            Redis: {
+                                redis_host: 'localhost',
+                                redis_port: 6379,
+                                redis_password: '123456',
+                                redis_db: 0,
+                                redis_key: 'urls'
+                            },
+                            mainClass: {
+                                secCode: 'zssh000016',
+                                collectionName: 'zssh000016'
+                            },
+                            CommentCrawler: {
+                                enabled: true,
+                                headless: false,
+                                wait_timeout: 10,
+                                max_retry: 3,
+                                start_date: '',
+                                end_date: ''
+                            }
+                        }
+                    }
+                }
+            },
+            computed: {
+                needsPagesConfig() {
+                    return ['post', 'sequential', 'parallel'].includes(this.configForm.crawler_type);
+                },
+                needsPostConfig() {
+                    return ['post', 'sequential', 'parallel'].includes(this.configForm.crawler_type);
+                },
+                needsCommentConfig() {
+                    return ['comment', 'sequential', 'parallel'].includes(this.configForm.crawler_type);
+                },
+                // 根据选中的文件夹过滤任务
+                filteredTaskConfigs() {
+                    if (this.selectedFolder === null) {
+                        return this.taskConfigs;
+                    }
+                    return this.taskConfigs.filter(task => task.folder_id === this.selectedFolder);
+                }
+            },
+            mounted() {
+                this.getCurrentUser();
+                this.loadSystemStatus();
+                this.loadTaskConfigs();
+                this.loadTaskFolders();
+                
+                // 定时刷新系统状态
+                setInterval(() => {
+                    this.loadSystemStatus();
+                    this.loadFullTextStatus();
+                    if (this.activeTab === 'queue') {
+                        this.loadTaskQueue();
+                    }
+                }, 5000);
+                
+                // 初始加载全文爬取器状态
+                this.loadFullTextStatus();
+            },
+            methods: {
+                async getCurrentUser() {
+                    try {
+                        const response = await axios.get('/api/auth/verify');
+                        if (response.data.success) {
+                            this.currentUser = response.data.data.username;
+                        }
+                    } catch (error) {
+                        console.error('获取用户信息失败:', error);
+                    }
+                },
+                
+                logout() {
+                    localStorage.removeItem('auth_token');
+                    sessionStorage.removeItem('auth_token');
+                    ElMessage.success('已退出登录');
+                    setTimeout(() => {
+                        window.location.href = '/static/login.html';
+                    }, 1000);
+                },
+                
+                async loadSystemStatus() {
+                    try {
+                        const response = await axios.get('/api/tasks/status');
+                        if (response.data.success) {
+                            this.systemStatus = response.data.data;
+                        }
+                    } catch (error) {
+                        console.error('加载系统状态失败:', error);
+                    }
+                },
+                
+                async loadTaskConfigs() {
+                    this.loading.configs = true;
+                    try {
+                        const response = await axios.get('/api/tasks/configs');
+                        if (response.data.success) {
+                            this.taskConfigs = response.data.data;
+                            
+                            // 从本地存储加载文件夹分配信息
+                            const savedConfigs = localStorage.getItem('taskConfigs');
+                            if (savedConfigs) {
+                                const localConfigs = JSON.parse(savedConfigs);
+                                this.taskConfigs.forEach(task => {
+                                    const localTask = localConfigs.find(t => t.id === task.id);
+                                    if (localTask && localTask.folder_id) {
+                                        task.folder_id = localTask.folder_id;
+                                    }
+                                });
+                            }
+                        }
+                    } catch (error) {
+                        ElMessage.error('加载任务配置失败: ' + error.message);
+                    } finally {
+                        this.loading.configs = false;
+                    }
+                },
+                
+                async loadTaskQueue() {
+                    this.loading.queue = true;
+                    try {
+                        const response = await axios.get('/api/tasks/queue');
+                        if (response.data.success) {
+                            // 修改这里：正确提取queue_tasks数组
+                            this.taskQueue = response.data.data.queue_tasks || [];
+                            // 可以同时保存其他有用信息
+                            this.queueInfo = {
+                                currentRunning: response.data.data.current_running,
+                                pendingCount: response.data.data.pending_count,
+                                totalInQueue: response.data.data.total_in_queue,
+                                schedulerStatus: response.data.data.scheduler_status
+                            };
+                            console.log('任务队列加载成功:', this.taskQueue);
+                        } else {
+                            ElMessage.error('加载任务队列失败: ' + response.data.message);
+                            this.taskQueue = [];
+                        }
+                    } catch (error) {
+                        console.error('加载任务队列错误:', error);
+                        ElMessage.error('加载任务队列失败: ' + error.message);
+                        this.taskQueue = [];
+                    } finally {
+                        this.loading.queue = false;
+                    }
+                },
+                
+                async loadTaskHistory() {
+                    this.loading.history = true;
+                    try {
+                        const response = await axios.get('/api/tasks/history', {
+                            params: {
+                                page: this.historyPage,
+                                limit: this.historyLimit
+                            }
+                        });
+                        if (response.data.success) {
+                            this.taskHistory = response.data.data;
+                        }
+                    } catch (error) {
+                        ElMessage.error('加载任务历史失败: ' + error.message);
+                    } finally {
+                        this.loading.history = false;
+                    }
+                },
+                
+                async toggleScheduler() {
+                    try {
+                        const action = this.systemStatus.scheduler_running ? 'stop' : 'start';
+                        const response = await axios.post(`/api/scheduler/${action}`);
+                        if (response.data.success) {
+                            ElMessage.success(response.data.message);
+                            this.loadSystemStatus();
+                        }
+                    } catch (error) {
+                        ElMessage.error('操作失败: ' + error.message);
+                    }
+                },
+                
+                async loadFullTextStatus() {
+                    try {
+                        const response = await axios.get('/api/fulltext/status');
+                        if (response.data.success) {
+                            this.fullTextStatus = response.data.data;
+                        }
+                    } catch (error) {
+                        console.error('加载全文爬取器状态失败:', error);
+                    }
+                },
+                
+                async toggleFullTextCrawler() {
+                    try {
+                        const action = this.fullTextStatus.is_running ? 'stop' : 'start';
+                        const response = await axios.post(`/api/fulltext/${action}`);
+                        if (response.data.success) {
+                            ElMessage.success(response.data.message);
+                            this.loadFullTextStatus();
+                        }
+                    } catch (error) {
+                        ElMessage.error('操作失败: ' + error.message);
+                    }
+                },
+                
+                handleTabClick(tab) {
+                    if (tab.name === 'queue') {
+                        this.loadTaskQueue();
+                    } else if (tab.name === 'history') {
+                        this.loadTaskHistory();
+                    }
+                },
+                
+                editConfig(config) {
+                    this.editingConfig = config;
+                    this.configForm = {
+                        task_name: config.task_name,
+                        description: config.description,
+                        crawler_type: config.crawler_type,
+                        priority: config.priority
+                    };
+                    
+                    // 获取配置数据
+                    axios.get(`/api/tasks/configs/${config.id}/data`).then(response => {
+                        if (response.data.success) {
+                            this.configFormJson = JSON.stringify(response.data.data, null, 2);
+                            // 尝试将JSON数据填充到表单
+                            this.populateFormFromJson(response.data.data);
+                        }
+                    }).catch(() => {
+                        this.configFormJson = '{}';
+                    });
+                    
+                    this.showCreateConfigDialog = true;
+                },
+                
+                onCrawlerTypeChange(type) {
+                    if (this.defaultConfigs[type] && !this.editingConfig) {
+                        if (this.configMode === 'json') {
+                            this.configFormJson = JSON.stringify(this.defaultConfigs[type], null, 2);
+                        } else {
+                            this.populateFormFromJson(this.defaultConfigs[type]);
+                        }
+                    }
+                },
+                
+                onConfigModeChange(mode) {
+                    if (mode === 'json') {
+                        // 从表单模式切换到JSON模式，将表单数据转换为JSON
+                        this.configFormJson = JSON.stringify(this.buildConfigFromForm(), null, 2);
+                    } else {
+                        // 从JSON模式切换到表单模式，将JSON数据填充到表单
+                        try {
+                            const jsonData = JSON.parse(this.configFormJson || '{}');
+                            this.populateFormFromJson(jsonData);
+                        } catch (e) {
+                            console.warn('JSON格式错误，使用默认配置');
+                        }
+                    }
+                },
+                
+                populateFormFromJson(data) {
+                    // 深度合并配置数据到表单
+                    if (data.MongoDB) {
+                        Object.assign(this.formConfig.MongoDB, data.MongoDB);
+                    }
+                    if (data.Redis) {
+                        Object.assign(this.formConfig.Redis, data.Redis);
+                    }
+                    if (data.mainClass) {
+                        Object.assign(this.formConfig.mainClass, data.mainClass);
+                    }
+                    if (data.PostCrawler) {
+                        Object.assign(this.formConfig.PostCrawler, data.PostCrawler);
+                    }
+                    if (data.CommentCrawler) {
+                        Object.assign(this.formConfig.CommentCrawler, data.CommentCrawler);
+                        // 处理日期格式
+                        if (data.CommentCrawler.start_date) {
+                            this.formConfig.CommentCrawler.start_date = new Date(data.CommentCrawler.start_date);
+                        }
+                        if (data.CommentCrawler.end_date) {
+                            this.formConfig.CommentCrawler.end_date = new Date(data.CommentCrawler.end_date);
+                        }
+                    }
+                    if (data.proxies) {
+                        Object.assign(this.formConfig.proxies, data.proxies);
+                    }
+                },
+                
+                buildConfigFromForm() {
+                    const config = {
+                        MongoDB: { ...this.formConfig.MongoDB },
+                        Redis: { ...this.formConfig.Redis },
+                        mainClass: { ...this.formConfig.mainClass },
+                        proxies: { ...this.formConfig.proxies }
+                    };
+                    
+                    // 根据爬虫类型添加相应配置
+                    if (this.needsPostConfig) {
+                        config.PostCrawler = { ...this.formConfig.PostCrawler };
+                    }
+                    
+                    if (this.needsCommentConfig) {
+                        config.CommentCrawler = { ...this.formConfig.CommentCrawler };
+                        // 处理日期格式
+                        if (config.CommentCrawler.start_date) {
+                            config.CommentCrawler.start_date = this.formatDate(config.CommentCrawler.start_date);
+                        }
+                        if (config.CommentCrawler.end_date) {
+                            config.CommentCrawler.end_date = this.formatDate(config.CommentCrawler.end_date);
+                        }
+                    }
+                    
+                    // 清理空值或禁用的代理配置
+                    if (!config.proxies.enabled || !config.proxies.tunnel) {
+                        delete config.proxies;
+                    }
+                    
+                    return config;
+                },
+                
+                onProxyToggle(enabled) {
+                    if (!enabled) {
+                        this.formConfig.proxies.tunnel = '';
+                    }
+                },
+                
+                formatDate(date) {
+                    if (!date) return '';
+                    if (typeof date === 'string') return date;
+                    return date.toISOString().split('T')[0];
+                },
+                
+                async saveConfig() {
+                    try {
+                        let configData;
+                        
+                        if (this.configMode === 'form') {
+                            // 表单模式：从表单构建配置数据
+                            configData = this.buildConfigFromForm();
+                        } else {
+                            // JSON模式：验证JSON格式
+                            try {
+                                configData = JSON.parse(this.configFormJson);
+                            } catch (e) {
+                                ElMessage.error('配置数据格式错误，请检查JSON格式');
+                                return;
+                            }
+                
+                        }
+                        
+                        const data = {
+                            ...this.configForm,
+                            config_data: configData
+                        };
+                        
+                        let response;
+                        if (this.editingConfig) {
+                            response = await axios.put(`/api/tasks/configs/${this.editingConfig.id}`, data);
+                        } else {
+                            response = await axios.post('/api/tasks/configs', data);
+                        }
+                        
+                        if (response.data.success) {
+                            ElMessage.success(this.editingConfig ? '更新成功' : '创建成功');
+                            this.handleCloseConfigDialog();
+                            this.$nextTick(() => {
+                                this.loadTaskConfigs();
+                            });
+                        }
+                    } catch (error) {
+                        ElMessage.error('保存失败: ' + error.message);
+                    }
+                },
+                
+                handleCloseConfigDialog() {
+                    this.showCreateConfigDialog = false;
+                    this.editingConfig = null;
+                    this.configForm = {
+                        task_name: '',
+                        description: '',
+                        crawler_type: '',
+                        priority: 0,
+                        enable_parallelism: false
+                    };
+                    this.configFormJson = '';
+                    this.configMode = 'form';
+                    // 重置表单配置为默认值
+                    this.formConfig = {
+                        MongoDB: {
+                            host: 'localhost',
+                            port: 27017,
+                            username: 'admin',
+                            password: 'aa20020320',
+                            database: 'guba'
+                        },
+                        Redis: {
+                            redis_host: 'localhost',
+                            redis_port: 6379,
+                            redis_password: '123456',
+                            redis_db: 0,
+                            redis_key: 'urls'
+                        },
+                        mainClass: {
+                            secCode: 'zssh000016',
+                            collectionName: 'zssh000016',
+                            pages_start: 1,
+                            pages_end: 10
+                        },
+                        PostCrawler: {
+                            thread_num: 4,
+                            start_page: 1,
+                            end_page: 10
+                        },
+                        CommentCrawler: {
+                            enabled: true,
+                            headless: false,
+                            wait_timeout: 10,
+                            max_retry: 3,
+                            start_date: '',
+                            end_date: ''
+                        },
+                        proxies: {
+                            enabled: false,
+                            tunnel: ''
+                        }
+                    };
+                },
+                
+                async deleteConfig(configId) {
+                    try {
+                        await ElMessageBox.confirm('确定要删除这个任务配置吗？', '确认删除', {
+                            type: 'warning'
+                        });
+                        
+                        const response = await axios.delete(`/api/tasks/configs/${configId}`);
+                        if (response.data.success) {
+                            ElMessage.success('删除成功');
+                            this.loadTaskConfigs();
+                        }
+                    } catch (error) {
+                        if (error !== 'cancel') {
+                            ElMessage.error('删除失败: ' + error.message);
+                        }
+                    }
+                },
+                
+                async addToQueue(configId) {
+                    try {
+                        const response = await axios.post('/api/tasks/queue', {
+                            task_config_id: configId
+                        });
+                        if (response.data.success) {
+                            ElMessage.success('已添加到队列');
+                            this.loadTaskQueue();
+                        }
+                    } catch (error) {
+                        ElMessage.error('添加到队列失败: ' + error.message);
+                    }
+                },
+                
+                async removeFromQueue(queueId) {
+                    try {
+                        await ElMessageBox.confirm('确定要从队列中移除这个任务吗？', '确认移除', {
+                            type: 'warning'
+                        });
+                        
+                        const response = await axios.delete(`/api/tasks/queue/${queueId}`);
+                        if (response.data.success) {
+                            ElMessage.success('已从队列移除');
+                            this.loadTaskQueue();
+                        }
+                    } catch (error) {
+                        if (error !== 'cancel') {
+                            ElMessage.error('移除失败: ' + error.message);
+                        }
+                    }
+                },
+                
+                getCrawlerTypeColor(type) {
+                    const colors = {
+                        post: 'primary',
+                        comment: 'success',
+                        full_text: 'warning',
+                        sequential: 'info',
+                        parallel: 'danger'
+                    };
+                    return colors[type] || 'default';
+                },
+                
+                getCrawlerTypeName(type) {
+                    const names = {
+                        post: '帖子爬取',
+                        comment: '评论爬取',
+                        full_text: '全文爬取',
+                        sequential: '顺序执行',
+                        parallel: '并行执行'
+                    };
+                    return names[type] || type;
+                },
+                
+                getStatusName(status) {
+                    const names = {
+                        pending: '等待中',
+                        running: '运行中',
+                        completed: '已完成',
+                        failed: '失败',
+                        cancelled: '已取消'
+                    };
+                    return names[status] || status;
+                },
+                
+                formatDateTime(dateStr) {
+    if (!dateStr) return '-';
+    const date = new Date(dateStr);
+    
+    // 手动将无时区的时间视为 UTC 时间
+    const localDate = new Date(date.getTime() + date.getTimezoneOffset() * 60000);
+    return localDate.toLocaleString('zh-CN');
+},
+formatDateTime2(dateStr) {
+    if (!dateStr) return '-';
+    const date = new Date(dateStr);
+    
+    // 增加8小时（东八区时间）
+    const utc8Time = date.getTime() //+ 8 * 3600 * 1000;
+    const utc8Date = new Date(utc8Time);
+    
+    return utc8Date.toLocaleString('zh-CN');
+},
+                
+                formatDuration(seconds) {
+                    if (!seconds) return '0秒';
+                    const hours = Math.floor(seconds / 3600);
+                    const minutes = Math.floor((seconds % 3600) / 60);
+                    const secs = seconds % 60;
+                    
+                    if (hours > 0) {
+                        return `${hours}小时${minutes}分钟${secs}秒`;
+                    } else if (minutes > 0) {
+                        return `${minutes}分钟${secs}秒`;
+                    } else {
+                        return `${secs}秒`;
+                    }
+                },
+                
+                async viewTaskLog(taskId) {
+                    this.currentTaskId = taskId;
+                    this.showLogDialog = true;
+                    this.logLoading = true;
+                    this.currentTaskLog = '';
+                    
+                    try {
+                        const response = await axios.get(`/api/tasks/${taskId}/logs`);
+                        if (response.data.success) {
+                            this.currentTaskLog = response.data.data.logs || '暂无日志内容';
+                        } else {
+                            this.currentTaskLog = '获取日志失败: ' + response.data.message;
+                        }
+                    } catch (error) {
+                        this.currentTaskLog = '获取日志失败: ' + error.message;
+                    } finally {
+                        this.logLoading = false;
+                    }
+                },
+                
+                closeLogDialog() {
+                    this.showLogDialog = false;
+                    this.currentTaskLog = '';
+                    this.currentTaskId = null;
+                },
+                
+                // 文件夹相关方法
+                async loadTaskFolders() {
+                    try {
+                        // 模拟从本地存储加载文件夹数据
+                        const folders = localStorage.getItem('taskFolders');
+                        this.taskFolders = folders ? JSON.parse(folders) : [];
+                    } catch (error) {
+                        console.error('加载文件夹失败:', error);
+                        this.taskFolders = [];
+                    }
+                },
+                
+                openCreateFolderDialog() {
+                    this.showCreateFolderDialog = true;
+                    this.folderForm = {
+                        name: '',
+                        description: ''
+                    };
+                },
+                
+                async createFolder() {
+                    if (!this.folderForm.name.trim()) {
+                        ElMessage.error('请输入文件夹名称');
+                        return;
+                    }
+                    
+                    try {
+                        const newFolder = {
+                            id: Date.now().toString(),
+                            name: this.folderForm.name.trim(),
+                            description: this.folderForm.description.trim(),
+                            created_at: new Date().toISOString()
+                        };
+                        
+                        this.taskFolders.push(newFolder);
+                        
+                        // 保存到本地存储
+                        localStorage.setItem('taskFolders', JSON.stringify(this.taskFolders));
+                        
+                        ElMessage.success('文件夹创建成功');
+                        this.showCreateFolderDialog = false;
+                        
+                        // 自动归类现有任务
+                        this.autoClassifyTasks();
+                        
+                    } catch (error) {
+                        ElMessage.error('创建文件夹失败: ' + error.message);
+                    }
+                },
+                
+                async deleteFolder(folderId) {
+                    try {
+                        await ElMessageBox.confirm('删除文件夹后，其中的任务将变为未分类状态。确定要删除吗？', '确认删除', {
+                            type: 'warning'
+                        });
+                        
+                        // 将该文件夹中的任务设为未分类
+                        this.taskConfigs.forEach(task => {
+                            if (task.folder_id === folderId) {
+                                task.folder_id = null;
+                            }
+                        });
+                        
+                        // 删除文件夹
+                        this.taskFolders = this.taskFolders.filter(folder => folder.id !== folderId);
+                        
+                        // 保存到本地存储
+                        localStorage.setItem('taskFolders', JSON.stringify(this.taskFolders));
+                        localStorage.setItem('taskConfigs', JSON.stringify(this.taskConfigs));
+                        
+                        // 如果当前选中的是被删除的文件夹，切换到全部任务
+                        if (this.selectedFolder === folderId) {
+                            this.selectedFolder = null;
+                        }
+                        
+                        ElMessage.success('文件夹删除成功');
+                        
+                    } catch (error) {
+                        if (error !== 'cancel') {
+                            ElMessage.error('删除文件夹失败: ' + error.message);
+                        }
+                    }
+                },
+                
+                selectFolder(folderId) {
+                    this.selectedFolder = folderId;
+                },
+                
+                getFolderTaskCount(folderId) {
+                    return this.taskConfigs.filter(task => task.folder_id === folderId).length;
+                },
+                
+                getFolderName(folderId) {
+                    if (!folderId) return '未分类';
+                    const folder = this.taskFolders.find(f => f.id === folderId);
+                    return folder ? folder.name : '未知文件夹';
+                },
+                
+                async moveTaskToFolder(taskId, folderId) {
+                    try {
+                        const task = this.taskConfigs.find(t => t.id === taskId);
+                        if (task) {
+                            task.folder_id = folderId;
+                            
+                            // 保存到本地存储
+                            localStorage.setItem('taskConfigs', JSON.stringify(this.taskConfigs));
+                            
+                            ElMessage.success('任务移动成功');
+                        }
+                    } catch (error) {
+                        ElMessage.error('移动任务失败: ' + error.message);
+                    }
+                },
+                
+                autoClassifyTasks() {
+                    let classifiedCount = 0;
+                    
+                    this.taskConfigs.forEach(task => {
+                        // 只对未分类的任务进行自动归类
+                        if (!task.folder_id) {
+                            for (const folder of this.taskFolders) {
+                                // 检查任务名称是否以文件夹名称为前缀
+                                if (task.task_name && task.task_name.startsWith(folder.name)) {
+                                    task.folder_id = folder.id;
+                                    classifiedCount++;
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                    
+                    if (classifiedCount > 0) {
+                        // 保存到本地存储
+                        localStorage.setItem('taskConfigs', JSON.stringify(this.taskConfigs));
+                        ElMessage.success(`已自动归类 ${classifiedCount} 个任务`);
+                    } else {
+                        ElMessage.info('没有找到可以自动归类的任务');
+                    }
+                }
+            }
+        }).use(ElementPlus).mount('#app');
+    </script>
+</body>
+</html>
+<div class="stage-indicator">
+    <div class="stage-step active">
+        <span class="stage-icon">🕷️</span> 爬虫任务调度系统
+    </div>
+    <div class="stage-step completed">
+        <span class="stage-icon">✔️</span> 已完成
+    </div>
+    <div class="stage-step failed">
+        <span class="stage-icon">❌</span> 失败
+    </div>
+</div>

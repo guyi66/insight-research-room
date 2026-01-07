@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>洞见投研台 | InsightDesk</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@1/css/pico.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='insight/insight.css') }}">
+    <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+</head>
+<body>
+    <div class="layout">
+        <aside class="sidebar">
+            <div class="brand">
+                <i class="ri-radar-line"></i>
+                <span>洞见投研台</span>
+                <small>InsightDesk</small>
+            </div>
+            <nav>
+                <a href="#" class="nav-item active" data-view="view-analysis"><i class="ri-search-eye-line"></i> 发起分析</a>
+                <a href="#" class="nav-item" data-view="view-monitor"><i class="ri-dashboard-3-line"></i> 任务监控</a>
+                <a href="#" class="nav-item" data-view="view-reports"><i class="ri-file-chart-line"></i> 研报与图表</a>
+                <a href="#" class="nav-item" data-view="view-evidence"><i class="ri-database-2-line"></i> 证据库</a>
+                <a href="#" class="nav-item" data-view="view-settings"><i class="ri-settings-4-line"></i> 系统配置</a>
+            </nav>
+            <div class="status-bar">
+                <div class="status-dot" id="globalStatusDot"></div>
+                <span id="statusText">系统空闲</span>
+            </div>
+        </aside>
+
+        <main class="content">
+            <section id="view-analysis" class="view active">
+                <header>
+                    <h2>发起新分析</h2>
+                    <div class="actions">
+                        <button id="runAnalysisBtn" class="primary"><i class="ri-play-fill"></i> 开始分析</button>
+                        <button id="runCrawlerBtn" class="secondary outline"><i class="ri-bug-line"></i> 仅运行爬虫</button>
+                    </div>
+                </header>
+
+                <div class="grid">
+                    <article>
+                        <header><strong>核心目标</strong></header>
+                        <label for="symbolInput">股票代码 / 查询指令</label>
+                        <input type="text" id="symbolInput" placeholder="例如：600519 或 '分析贵州茅台的近况'" required>
+
+                        <label for="nameInput">股票名称 (可选)</label>
+                        <input type="text" id="nameInput" placeholder="例如：贵州茅台">
+
+                        <label>生成模式</label>
+                        <div class="checklist" id="reportModes">
+                            <label><input type="checkbox" value="tech"> 技术面</label>
+                            <label><input type="checkbox" value="fund"> 基本面</label>
+                            <label><input type="checkbox" value="news"> 消息面</label>
+                            <label><input type="checkbox" value="combined" checked> 综合报告</label>
+                        </div>
+                    </article>
+
+                    <article>
+                        <header><strong>数据与参数</strong></header>
+                        <div class="grid">
+                            <div>
+                                <label for="newsDays">消息面回溯 (天)</label>
+                                <input type="number" id="newsDays" value="7" min="1">
+                            </div>
+                            <div>
+                                <label for="mindspiderDays">爬虫回溯 (天)</label>
+                                <input type="number" id="mindspiderDays" value="1" min="1">
+                            </div>
+                        </div>
+
+                        <label><input type="checkbox" id="useBocha"> 启用 Bocha 联网搜索</label>
+                        <label><input type="checkbox" id="includeRealtime"> 包含盘中实时数据 (较慢)</label>
+
+                        <details>
+                            <summary>爬虫高级设置</summary>
+                            <label><input type="checkbox" id="crawlMindspider"> 启用 MindSpider (社交媒体)</label>
+                            <div class="tags-input" id="mindspiderPlatforms">
+                                <label><input type="checkbox" value="wb" checked> 微博</label>
+                                <label><input type="checkbox" value="xhs" checked> 小红书</label>
+                                <label><input type="checkbox" value="zhihu" checked> 知乎</label>
+                                <label><input type="checkbox" value="tieba" checked> 贴吧</label>
+                                <label><input type="checkbox" value="bilibili" checked> B站</label>
+                                <label><input type="checkbox" value="douyin" checked> 抖音</label>
+                                <label><input type="checkbox" value="kuaishou" checked> 快手</label>
+                            </div>
+                            <label style="margin-top:10px"><input type="checkbox" id="crawlGuba"> 启用股吧爬虫</label>
+                            <input type="text" id="crawlerKeywords" placeholder="自定义爬虫关键词 (逗号分隔)">
+                        </details>
+                    </article>
+                </div>
+            </section>
+
+            <section id="view-monitor" class="view">
+                <header>
+                    <h2>任务监控中心</h2>
+                    <button class="outline secondary" id="stopPollingBtn"><i class="ri-stop-circle-line"></i> 停止刷新</button>
+                </header>
+
+                <div class="agent-matrix">
+                    <div class="agent-card pending" id="card-orchestrator" onclick="selectAgentLog('orchestrator')">
+                        <div class="name">Orchestrator</div>
+                        <div class="status">Pending</div>
+                    </div>
+                    <div class="agent-card pending" id="card-tech" onclick="selectAgentLog('tech')">
+                        <div class="name">Technical</div>
+                        <div class="status">Pending</div>
+                    </div>
+                    <div class="agent-card pending" id="card-fund" onclick="selectAgentLog('fund')">
+                        <div class="name">Fundamental</div>
+                        <div class="status">Pending</div>
+                    </div>
+                    <div class="agent-card pending" id="card-news" onclick="selectAgentLog('news')">
+                        <div class="name">Message</div>
+                        <div class="status">Pending</div>
+                    </div>
+                    <div class="agent-card pending" id="card-combined" onclick="selectAgentLog('combined')">
+                        <div class="name">Combined</div>
+                        <div class="status">Pending</div>
+                    </div>
+                </div>
+
+                <div class="logs-container">
+                    <div class="log-header">
+                        <span id="currentLogLabel">系统日志</span>
+                    </div>
+                    <div class="log-window" id="logBox"></div>
+                </div>
+            </section>
+
+            <section id="view-reports" class="view">
+                <header>
+                    <h2>研报与图表</h2>
+                    <div class="actions">
+                        <button class="outline" id="exportPdfBtn"><i class="ri-file-pdf-line"></i> 导出 PDF</button>
+                        <button class="outline" id="exportCsvBtn"><i class="ri-file-excel-line"></i> 导出 CSV</button>
+                        <a href="#" target="_blank" id="openNewTabBtn" role="button" class="outline">新窗口打开</a>
+                    </div>
+                </header>
+
+                <div class="report-layout">
+                    <div class="report-sidebar">
+                        <h6>报告类型</h6>
+                        <div class="pill-list" id="reportLinks"></div>
+
+                        <hr>
+
+                        <h6>市场图表</h6>
+                        <div id="chartSymbolLinks" class="pill-list symbol-switcher" style="display:none; margin-bottom: 10px;"></div>
+                        <div class="pill-list" id="chartLinks"></div>
+                    </div>
+                    <div class="report-viewer">
+                        <iframe id="reportFrame" title="Report Preview"></iframe>
+                    </div>
+                </div>
+            </section>
+
+            <section id="view-evidence" class="view">
+                <header>
+                    <h2>证据溯源</h2>
+                    <div class="actions">
+                        <input type="search" id="evidenceSearch" placeholder="搜索证据关键词..." style="margin-bottom:0; width: 250px;">
+                        <button id="loadEvidenceBtn">刷新</button>
+                    </div>
+                </header>
+
+                <div id="evidenceSymbolLinks" class="pill-list symbol-switcher" style="display:none; margin-bottom: 1rem;"></div>
+
+                <div class="evidence-wrapper">
+                    <table class="striped">
+                        <thead>
+                            <tr>
+                                <th width="60">ID</th>
+                                <th width="80">类型</th>
+                                <th width="140">时间</th>
+                                <th>标题</th>
+                                <th>摘要</th>
+                                <th width="100">来源</th>
+                                <th width="60">链接</th>
+                            </tr>
+                        </thead>
+                        <tbody id="evidenceBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section id="view-settings" class="view">
+                <header>
+                    <h2>系统配置</h2>
+                    <div class="actions">
+                        <button id="loadConfigBtn" class="secondary outline">重置/加载默认</button>
+                        <button id="saveConfigBtn" class="primary">保存配置</button>
+                    </div>
+                </header>
+
+                <div class="grid">
+                    <article>
+                        <header><strong>Technical Agent (技术面)</strong></header>
+                        <label>Base URL <input type="text" id="techBaseUrl"></label>
+                        <label>API Key <input type="password" id="techApiKey"></label>
+                        <label>Model <input type="text" id="techModelName" list="modelList"></label>
+                    </article>
+
+                    <article>
+                        <header><strong>Fundamental Agent (基本面)</strong></header>
+                        <label>Base URL <input type="text" id="fundBaseUrl"></label>
+                        <label>API Key <input type="password" id="fundApiKey"></label>
+                        <label>Model <input type="text" id="fundModelName" list="modelList"></label>
+                    </article>
+
+                    <article>
+                        <header><strong>Message Agent (消息面)</strong></header>
+                        <label>Base URL <input type="text" id="newsBaseUrl"></label>
+                        <label>API Key <input type="password" id="newsApiKey"></label>
+                        <label>Model <input type="text" id="newsModelName" list="modelList"></label>
+                        <label>Bocha API Key <input type="password" id="bochaApiKey"></label>
+                    </article>
+
+                    <article>
+                        <header><strong>本地数据库 (MySQL)</strong></header>
+                        <div class="grid">
+                            <label>Host <input type="text" id="dbHost" placeholder="localhost"></label>
+                            <label>Port <input type="number" id="dbPort" placeholder="3306"></label>
+                        </div>
+                        <div class="grid">
+                            <label>User <input type="text" id="dbUser"></label>
+                            <label>Password <input type="password" id="dbPassword"></label>
+                        </div>
+                        <label>DB Name <input type="text" id="dbName"></label>
+                    </article>
+                </div>
+
+                <datalist id="modelList">
+                    <option value="deepseek-chat">
+                    <option value="deepseek-reasoner">
+                    <option value="gpt-4o">
+                    <option value="claude-3-5-sonnet">
+                </datalist>
+                <div id="configToast" class="toast"></div>
+            </section>
+        </main>
+    </div>
+    <script src="{{ url_for('static', filename='insight/insight.js') }}"></script>
+</body>
+</html>
