@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>爬虫任务调度系统 - 登录</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/element-plus/dist/index.full.js"></script>
+    <script src="https://unpkg.com/@element-plus/icons-vue/dist/index.iife.min.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .login-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            width: 400px;
+            max-width: 90vw;
+        }
+        
+        .login-header {
+            background: linear-gradient(90deg, #409EFF 0%, #67C23A 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .login-header h1 {
+            margin: 0;
+            font-size: 24px;
+            font-weight: 600;
+        }
+        
+        .login-header p {
+            margin: 10px 0 0 0;
+            opacity: 0.9;
+            font-size: 14px;
+        }
+        
+        .login-form {
+            padding: 40px;
+        }
+        
+        .form-item {
+            margin-bottom: 25px;
+        }
+        
+        .form-item:last-child {
+            margin-bottom: 0;
+        }
+        
+        .login-button {
+            width: 100%;
+            height: 45px;
+            font-size: 16px;
+            font-weight: 600;
+        }
+        
+        .error-message {
+            color: #F56C6C;
+            font-size: 14px;
+            margin-top: 10px;
+            text-align: center;
+        }
+        
+        .footer {
+            text-align: center;
+            padding: 20px;
+            color: #909399;
+            font-size: 12px;
+            border-top: 1px solid #EBEEF5;
+        }
+        
+        .input-icon {
+            color: #C0C4CC;
+        }
+        
+        .remember-me {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+        }
+        
+        .forgot-password {
+            color: #409EFF;
+            text-decoration: none;
+            font-size: 14px;
+        }
+        
+        .forgot-password:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="login-container">
+            <div class="login-header">
+                <h1>🕷️ 爬虫任务调度系统</h1>
+                <p>请登录以访问系统</p>
+            </div>
+            
+            <div class="login-form">
+                <el-form :model="loginForm" :rules="rules" ref="loginFormRef" @submit.prevent="handleLogin">
+                    <div class="form-item">
+                        <el-input
+                            v-model="loginForm.username"
+                            placeholder="请输入用户名"
+                            size="large"
+                            :prefix-icon="User"
+                            clearable
+                        ></el-input>
+                    </div>
+                    
+                    <div class="form-item">
+                        <el-input
+                            v-model="loginForm.password"
+                            type="password"
+                            placeholder="请输入密码"
+                            size="large"
+                            :prefix-icon="Lock"
+                            show-password
+                            @keyup.enter="handleLogin"
+                        ></el-input>
+                    </div>
+                    
+                    <div class="form-item">
+                        <el-select v-model="loginForm.version" placeholder="选择系统版本" size="large" style="width: 100%;">
+                            <el-option label="🚀 增强版 (推荐) - 三阶段任务管理" value="enhanced"></el-option>
+                            <el-option label="📊 经典版 - 传统任务管理" value="classic"></el-option>
+                        </el-select>
+                    </div>
+                    
+                    <div class="remember-me">
+                        <el-checkbox v-model="loginForm.remember">记住我</el-checkbox>
+                        <a href="#" class="forgot-password">忘记密码？</a>
+                    </div>
+                    
+                    <div class="form-item">
+                        <el-button 
+                            type="primary" 
+                            class="login-button"
+                            :loading="loading"
+                            @click="handleLogin"
+                        >
+                            {{ loading ? '登录中...' : '登录' }}
+                        </el-button>
+                    </div>
+                    
+                    <div v-if="errorMessage" class="error-message">
+                        {{ errorMessage }}
+                    </div>
+                </el-form>
+            </div>
+            
+            <div class="footer">
+                <p>© 2025 供学术使用.</p>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const { createApp, ref } = Vue;
+        const { ElMessage } = ElementPlus;
+        const { User, Lock } = ElementPlusIconsVue;
+        
+        createApp({
+            setup() {
+                const loginFormRef = ref();
+                const loading = ref(false);
+                const errorMessage = ref('');
+                
+                const loginForm = ref({
+                    username: '',
+                    password: '',
+                    remember: false,
+                    version: 'enhanced'
+                });
+                
+                const rules = {
+                    username: [
+                        { required: true, message: '请输入用户名', trigger: 'blur' }
+                    ],
+                    password: [
+                        { required: true, message: '请输入密码', trigger: 'blur' },
+                        { min: 6, message: '密码长度不能少于6位', trigger: 'blur' }
+                    ]
+                };
+                
+                // 检查是否已经登录
+                const checkAuth = () => {
+                    const token = localStorage.getItem('auth_token');
+                    if (token) {
+                        // 验证token是否有效
+                        axios.get('/api/auth/verify', {
+                            headers: {
+                                'Authorization': `Bearer ${token}`
+                            }
+                        }).then(response => {
+                            if (response.data.success) {
+                                window.location.href = '/index.html';
+                            } else {
+                                localStorage.removeItem('auth_token');
+                            }
+                        }).catch(() => {
+                            localStorage.removeItem('auth_token');
+                        });
+                    }
+                };
+                
+                const handleLogin = async () => {
+                    if (!loginFormRef.value) return;
+                    
+                    try {
+                        const valid = await loginFormRef.value.validate();
+                        if (!valid) return;
+                    } catch (error) {
+                        return;
+                    }
+                    
+                    loading.value = true;
+                    errorMessage.value = '';
+                    
+                    try {
+                        const response = await axios.post('/api/auth/login', {
+                            username: loginForm.value.username,
+                            password: loginForm.value.password
+                        });
+                        
+                        if (response.data.success) {
+                            const token = response.data.data.token;
+                            
+                            // 保存token
+                            if (loginForm.value.remember) {
+                                localStorage.setItem('auth_token', token);
+                            } else {
+                                sessionStorage.setItem('auth_token', token);
+                            }
+                            
+                            ElMessage.success('登录成功');
+                            
+                            // 跳转到index.html
+                            setTimeout(() => {
+                                window.location.href = '/index.html';
+                            }, 1000);
+                        } else {
+                            errorMessage.value = response.data.message || '登录失败';
+                        }
+                    } catch (error) {
+                        console.error('登录错误:', error);
+                        if (error.response && error.response.data) {
+                            errorMessage.value = error.response.data.message || '登录失败';
+                        } else {
+                            errorMessage.value = '网络错误，请稍后重试';
+                        }
+                    } finally {
+                        loading.value = false;
+                    }
+                };
+                
+                // 页面加载时检查认证状态
+                checkAuth();
+                
+                return {
+                    loginFormRef,
+                    loginForm,
+                    rules,
+                    loading,
+                    errorMessage,
+                    handleLogin,
+                    User,
+                    Lock
+                };
+            }
+        }).use(ElementPlus).mount('#app');
+    </script>
+</body>
+</html>
