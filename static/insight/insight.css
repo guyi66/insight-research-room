@@ -1,0 +1,81 @@
+:root {
+    --primary: #1095c1;
+    --primary-hover: #08769b;
+    --sidebar-bg: #1e293b;
+    --sidebar-text: #e2e8f0;
+    --bg-color: #f8fafc;
+}
+
+body { background-color: var(--bg-color); font-family: system-ui, -apple-system, sans-serif; }
+
+/* 布局 */
+.layout { display: flex; height: 100vh; overflow: hidden; }
+.sidebar { width: 260px; background: var(--sidebar-bg); color: var(--sidebar-text); display: flex; flex-direction: column; flex-shrink: 0; }
+.content { flex-grow: 1; overflow-y: auto; padding: 2rem; }
+
+/* 侧边栏 */
+.brand { padding: 1.5rem; font-size: 1.25rem; font-weight: bold; border-bottom: 1px solid rgba(255,255,255,0.1); display: flex; align-items: center; gap: 10px; }
+.brand small { font-size: 0.8rem; opacity: 0.6; display: block; font-weight: normal; }
+.sidebar nav { padding: 1rem 0; flex-grow: 1; }
+.nav-item { display: block; padding: 0.75rem 1.5rem; color: var(--sidebar-text); text-decoration: none; opacity: 0.7; transition: 0.2s; display: flex; align-items: center; gap: 10px; }
+.nav-item:hover, .nav-item.active { background: rgba(255,255,255,0.1); opacity: 1; border-right: 3px solid var(--primary); }
+.status-bar { padding: 1rem 1.5rem; background: rgba(0,0,0,0.2); font-size: 0.85rem; display: flex; align-items: center; gap: 8px; }
+.status-dot { width: 10px; height: 10px; border-radius: 50%; background: #666; }
+.status-dot.running { background: #40c057; box-shadow: 0 0 8px #40c057; }
+
+/* 视图切换 */
+.view { display: none; animation: fadeIn 0.3s; }
+.view.active { display: block; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+/* 组件微调 */
+header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 1rem; }
+header h2 { margin: 0; font-size: 1.5rem; color: #1e293b; }
+article { background: #fff; padding: 1.5rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; height: 100%; }
+.checklist, .tags-input { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.5rem; }
+
+/* 监控矩阵 */
+.agent-matrix { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.agent-card { background: #fff; padding: 1rem; border-radius: 6px; border: 1px solid #e2e8f0; cursor: pointer; transition: 0.2s; text-align: center; }
+.agent-card:hover { transform: translateY(-2px); box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+.agent-card.active { border-color: var(--primary); background: #f0f9ff; }
+.agent-card .name { font-weight: bold; font-size: 0.9rem; margin-bottom: 5px; }
+.agent-card .status { font-size: 0.75rem; padding: 2px 8px; border-radius: 10px; display: inline-block; background: #eee; }
+/* 状态颜色 */
+.agent-card.running .status { background: #dbeafe; color: #1e40af; }
+.agent-card.done .status { background: #dcfce7; color: #166534; }
+.agent-card.error .status { background: #fee2e2; color: #991b1b; }
+
+/* 日志窗口 */
+.logs-container { background: #1e1e1e; color: #d4d4d4; border-radius: 8px; font-family: monospace; font-size: 0.85rem; height: 400px; display: flex; flex-direction: column; }
+.log-header { padding: 10px 15px; background: #2d2d2d; border-bottom: 1px solid #333; font-weight: bold; }
+.log-window { padding: 15px; overflow-y: auto; flex-grow: 1; white-space: pre-wrap; }
+
+/* 报表布局 */
+.report-layout { display: flex; gap: 1rem; height: calc(100vh - 150px); }
+.report-sidebar { width: 200px; flex-shrink: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.report-viewer { flex-grow: 1; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; }
+iframe { width: 100%; height: 100%; border: none; }
+.pill-list a { display: block; padding: 8px 12px; font-size: 0.9rem; text-decoration: none; border-radius: 4px; color: #475569; margin-bottom: 4px; cursor: pointer; }
+.pill-list a:hover { background: #f1f5f9; }
+.pill-list a.active { background: var(--primary); color: #fff; }
+
+/* 表格优化 */
+.evidence-wrapper { overflow-x: auto; background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+table.striped th { background: #f8fafc; text-align: left; }
+td { max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* --- 新增：多股票切换样式 --- */
+.symbol-switcher a {
+    text-align: center;
+    font-weight: bold;
+    border: 1px solid #cbd5e1;
+    margin-right: 5px; /* 按钮间距 */
+}
+
+/* 选中股票时，使用深色背景强调 */
+.symbol-switcher a.active {
+    background-color: #0f172a !important; /* 深蓝黑 */
+    color: #fff !important;
+    border-color: #0f172a !important;
+}

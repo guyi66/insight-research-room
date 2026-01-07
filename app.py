@@ -2,14 +2,21 @@
 Flask主应用 - 统一管理三个Streamlit应用
 """
 
+import csv
+import html as _html
+import io
+import json
 import os
+import re
 import sys
 import subprocess
 import time
 import threading
+import uuid
 from datetime import datetime
 from queue import Queue
-from flask import Flask, render_template, request, jsonify, Response
+from typing import Any, Dict, List
+from flask import Flask, render_template, request, jsonify, Response, send_from_directory, redirect, url_for
 from flask_socketio import SocketIO, emit
 import atexit
 import requests
@@ -17,25 +24,24 @@ from loguru import logger
 import importlib
 from pathlib import Path
 from MindSpider.main import MindSpider
+from analysis_pipeline import run_pipeline
+import pandas as pd
 
-# 导入ReportEngine
 try:
-    from ReportEngine.flask_interface import report_bp, initialize_report_engine
-    REPORT_ENGINE_AVAILABLE = True
-except ImportError as e:
-    logger.error(f"ReportEngine导入失败: {e}")
-    REPORT_ENGINE_AVAILABLE = False
+    import akshare as ak
+    HAS_AKSHARE = True
+except Exception:
+    ak = None  # type: ignore
+    HAS_AKSHARE = False
+
+# Cache for stock name lookup
+_STOCK_NAME_CACHE: Dict[str, Any] = {"ts": 0.0, "name_to_codes": {}, "code_to_name": {}}
+_STOCK_NAME_LOCK = threading.Lock()
+_STOCK_NAME_TTL = 6 * 3600
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'Dedicated-to-creating-a-concise-and-versatile-public-opinion-analysis-platform'
-socketio = SocketIO(app, cors_allowed_origins="*")
-
-# 注册ReportEngine Blueprint
-if REPORT_ENGINE_AVAILABLE:
-    app.register_blueprint(report_bp, url_prefix='/api/report')
-    logger.info("ReportEngine接口已注册")
-else:
-    logger.info("ReportEngine不可用，跳过接口注册")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 # 设置UTF-8编码环境
 os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -44,6 +50,268 @@ os.environ['PYTHONUTF8'] = '1'
 # 创建日志目录
 LOG_DIR = Path('logs')
 LOG_DIR.mkdir(exist_ok=True)
+
+ANALYSIS_JOBS = {}
+ANALYSIS_LOCK = threading.Lock()
+
+def _load_stock_name_map() -> Dict[str, Dict[str, Any]]:
+    if not HAS_AKSHARE:
+        return {"name_to_codes": {}, "code_to_name": {}}
+    now = time.time()
+    cache_dir = Path("reports") / "_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / "stock_name_map.json"
+
+    with _STOCK_NAME_LOCK:
+        ts = float(_STOCK_NAME_CACHE.get("ts") or 0.0)
+        if _STOCK_NAME_CACHE.get("name_to_codes") and now - ts < _STOCK_NAME_TTL:
+            return {
+                "name_to_codes": _STOCK_NAME_CACHE.get("name_to_codes") or {},
+                "code_to_name": _STOCK_NAME_CACHE.get("code_to_name") or {},
+            }
+        if cache_path.exists():
+            try:
+                data = json.loads(cache_path.read_text(encoding="utf-8"))
+                cached_ts = float(data.get("ts") or 0.0)
+                if data.get("name_to_codes") and now - cached_ts < _STOCK_NAME_TTL:
+                    _STOCK_NAME_CACHE.update({
+                        "ts": cached_ts,
+                        "name_to_codes": data.get("name_to_codes") or {},
+                        "code_to_name": data.get("code_to_name") or {},
+                    })
+                    return {
+                        "name_to_codes": _STOCK_NAME_CACHE.get("name_to_codes") or {},
+                        "code_to_name": _STOCK_NAME_CACHE.get("code_to_name") or {},
+                    }
+            except Exception:
+                pass
+
+        name_to_codes: Dict[str, List[str]] = {}
+        code_to_name: Dict[str, str] = {}
+        try:
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                for row in df.to_dict(orient="records"):
+                    name = str(row.get("名称") or row.get("name") or row.get("股票简称") or "").strip()
+                    code = str(row.get("代码") or row.get("code") or row.get("股票代码") or "").strip()
+                    if not name or not code:
+                        continue
+                    if code.isdigit() and len(code) == 6:
+                        code = code.zfill(6)
+                    name_to_codes.setdefault(name, []).append(code)
+                    code_to_name[code] = name
+        except Exception:
+            name_to_codes = {}
+            code_to_name = {}
+
+        _STOCK_NAME_CACHE.update({
+            "ts": now,
+            "name_to_codes": name_to_codes,
+            "code_to_name": code_to_name,
+        })
+        try:
+            cache_path.write_text(
+                json.dumps({"ts": now, "name_to_codes": name_to_codes, "code_to_name": code_to_name}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+        return {"name_to_codes": name_to_codes, "code_to_name": code_to_name}
+
+
+def _resolve_symbols_from_query(query: str) -> List[Dict[str, str]]:
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    ordered_codes: List[str] = []
+    seen = set()
+
+    def _add_code(code: str) -> None:
+        if not code:
+            return
+        if code in seen:
+            return
+        seen.add(code)
+        ordered_codes.append(code)
+
+    for match in re.finditer(r"(?i)(sh|sz|bj)[\s\.]?(\d{6})", query):
+        _add_code(match.group(2))
+    for match in re.finditer(r"\b\d{6}\b", query):
+        _add_code(match.group(0))
+
+    has_chinese = re.search(r"[\u4e00-\u9fa5]", query) is not None
+    name_to_codes: Dict[str, List[str]] = {}
+    code_to_name: Dict[str, str] = {}
+    if has_chinese:
+        maps = _load_stock_name_map()
+        name_to_codes = maps.get("name_to_codes") or {}
+        code_to_name = maps.get("code_to_name") or {}
+
+        stripped = re.sub(r"\s+", "", query)
+        name_hits: List[tuple[int, str]] = []
+        for name in name_to_codes.keys():
+            if not name or len(name) < 2:
+                continue
+            idx = stripped.find(name)
+            if idx >= 0:
+                name_hits.append((idx, name))
+        name_hits.sort(key=lambda x: x[0])
+        for _, name in name_hits:
+            codes = name_to_codes.get(name) or []
+            for code in codes[:1]:
+                _add_code(code)
+
+        if not name_hits:
+            tokens = re.split(r"[，,、/\s]+", query)
+            for token in tokens:
+                token = token.strip()
+                if token in ("分析", "帮我分析", "对比", "比较", "以及", "还有"):
+                    continue
+                codes = name_to_codes.get(token) or []
+                for code in codes[:1]:
+                    _add_code(code)
+
+    if not code_to_name and ordered_codes:
+        maps = _load_stock_name_map()
+        code_to_name = maps.get("code_to_name") or {}
+
+    results: List[Dict[str, str]] = []
+    for code in ordered_codes:
+        results.append({
+            "symbol": code,
+            "name": code_to_name.get(code, ""),
+        })
+    return results
+
+
+def _to_brief_paragraph(md_text: str, max_len: int = 420) -> str:
+    text = re.sub(r"[`#>*_\[\]]", " ", md_text or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+    if len(text) > max_len:
+        text = text[:max_len].rstrip() + "..."
+    return text
+
+
+def _load_brief_md(report_dir: Path, symbol: str, report_urls: Dict[str, str]) -> str:
+    if not report_dir or not symbol:
+        return ""
+    filename_map = {
+        "tech": f"{symbol}_tech_md.json",
+        "fund": f"{symbol}_fund_md.json",
+        "news": f"{symbol}_news_md.json",
+    }
+    for mode in ("fund", "news", "tech"):
+        if mode not in report_urls:
+            continue
+        path = report_dir / "materials" / filename_map.get(mode, "")
+        if not path.name:
+            continue
+        data = _read_json_file(path)
+        if isinstance(data, dict):
+            text = str(data.get("analysis_md") or data.get("md") or data.get("overview_md") or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _build_multi_stock_report(
+    results: List[Dict[str, Any]],
+    output_dir: str,
+    job_id: str,
+    query: str,
+) -> str:
+    out_dir = Path(output_dir or "reports")
+    report_dir = out_dir / "multi" / job_id
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    buttons_html = []
+    panels_html = []
+    for idx, item in enumerate(results):
+        symbol = item.get("symbol") or ""
+        name = item.get("name") or ""
+        label = f"{name}({symbol})" if name else symbol
+        btn_id = f"btn-{symbol}"
+        panel_id = f"panel-{symbol}"
+        active_cls = " active" if idx == 0 else ""
+        display = "" if idx == 0 else "display:none"
+
+        overview_md = item.get("overview_md") or ""
+        brief = _to_brief_paragraph(overview_md)
+        brief_html = f"<p class='summary'>{_html.escape(brief)}</p>" if brief else "<p class='summary'>暂无摘要</p>"
+
+        report_urls = item.get("report_urls") or {}
+        label_map = {
+            "combined": "综合",
+            "tech": "技术面",
+            "fund": "基本面",
+            "news": "消息面",
+        }
+        ordered_modes = [m for m in ("combined", "fund", "tech", "news") if m in report_urls]
+        report_links = [
+            f"<a class='link' href='{report_urls[m]}' target='_blank'>{label_map.get(m, m)}</a>"
+            for m in ordered_modes
+        ]
+        report_link = " ".join(report_links)
+
+        buttons_html.append(
+            f"<button id='{btn_id}' class='btn{active_cls}' onclick=\"showPanel('{symbol}')\">{_html.escape(label)}</button>"
+        )
+        panels_html.append(
+            f"""
+            <div id='{panel_id}' class='panel' style='{display}'>
+              <h2>{_html.escape(label)}</h2>
+              {brief_html}
+              <div class='links'>{report_link}</div>
+            </div>
+            """
+        )
+
+    title = "多股票分析"
+    html = f"""
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>{_html.escape(title)}</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 1100px; margin: auto; padding: 24px; line-height:1.7; color:#222 }}
+.toolbar {{ display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 20px }}
+.btn {{ padding:8px 14px; border-radius:6px; border:1px solid #ddd; cursor:pointer; background:#fff }}
+.btn.active {{ background:#0078D4; color:#fff; border-color:#0078D4 }}
+.panel {{ border:1px solid #eee; padding:16px; border-radius:6px; background:#fff; margin-bottom:16px }}
+.summary {{ font-size:16px; }}
+.links {{ margin-top:12px }}
+.link {{ color:#0078D4; text-decoration:none; }}
+.link:hover {{ text-decoration:underline; }}
+</style>
+</head>
+<body>
+<h1>{_html.escape(title)}</h1>
+<p>查询：{_html.escape(query)}</p>
+<div class='toolbar'>
+  {''.join(buttons_html)}
+</div>
+{''.join(panels_html)}
+<script>
+function showPanel(symbol) {{
+  document.querySelectorAll('.panel').forEach((el) => {{
+    el.style.display = (el.id === 'panel-' + symbol) ? '' : 'none';
+  }});
+  document.querySelectorAll('.btn').forEach((el) => {{
+    el.classList.toggle('active', el.id === 'btn-' + symbol);
+  }});
+}}
+</script>
+</body>
+</html>
+"""
+    out_path = report_dir / "multi_report.html"
+    out_path.write_text(html, encoding="utf-8")
+    return str(out_path)
 
 CONFIG_MODULE_NAME = 'config'
 CONFIG_FILE_PATH = Path(__file__).resolve().parent / 'config.py'
@@ -63,12 +331,6 @@ CONFIG_KEYS = [
     'MEDIA_ENGINE_API_KEY',
     'MEDIA_ENGINE_BASE_URL',
     'MEDIA_ENGINE_MODEL_NAME',
-    'QUERY_ENGINE_API_KEY',
-    'QUERY_ENGINE_BASE_URL',
-    'QUERY_ENGINE_MODEL_NAME',
-    'REPORT_ENGINE_API_KEY',
-    'REPORT_ENGINE_BASE_URL',
-    'REPORT_ENGINE_MODEL_NAME',
     'FORUM_HOST_API_KEY',
     'FORUM_HOST_BASE_URL',
     'FORUM_HOST_MODEL_NAME',
@@ -220,7 +482,7 @@ def _prepare_system_start():
 
 
 def initialize_system_components():
-    """启动所有依赖组件（Streamlit 子应用、ForumEngine、ReportEngine）。"""
+    """Start system components (Streamlit apps, ForumEngine)."""
     logs = []
     errors = []
     
@@ -267,19 +529,6 @@ def initialize_system_components():
         error_msg = f"ForumEngine 启动失败: {exc}"
         logs.append(error_msg)
         errors.append(error_msg)
-
-    if REPORT_ENGINE_AVAILABLE:
-        try:
-            if initialize_report_engine():
-                logs.append("ReportEngine 初始化成功")
-            else:
-                msg = "ReportEngine 初始化失败"
-                logs.append(msg)
-                errors.append(msg)
-        except Exception as exc:  # pragma: no cover
-            msg = f"ReportEngine 初始化异常: {exc}"
-            logs.append(msg)
-            errors.append(msg)
 
     if errors:
         cleanup_processes()
@@ -441,22 +690,16 @@ forum_monitor_thread.start()
 # 全局变量存储进程信息
 processes = {
     'insight': {'process': None, 'port': 8501, 'status': 'stopped', 'output': [], 'log_file': None},
-    'media': {'process': None, 'port': 8502, 'status': 'stopped', 'output': [], 'log_file': None},
-    'query': {'process': None, 'port': 8503, 'status': 'stopped', 'output': [], 'log_file': None},
     'forum': {'process': None, 'port': None, 'status': 'stopped', 'output': [], 'log_file': None}  # 启动后标记为 running
 }
 
 STREAMLIT_SCRIPTS = {
     'insight': 'SingleEngineApp/insight_engine_streamlit_app.py',
-    'media': 'SingleEngineApp/media_engine_streamlit_app.py',
-    'query': 'SingleEngineApp/query_engine_streamlit_app.py'
 }
 
 # 输出队列
 output_queues = {
     'insight': Queue(),
-    'media': Queue(),
-    'query': Queue(),
     'forum': Queue()
 }
 
@@ -734,7 +977,899 @@ atexit.register(cleanup_processes)
 @app.route('/')
 def index():
     """主页"""
-    return render_template('index.html')
+    return redirect(url_for('insight_page'))
+
+
+@app.route('/analysis')
+def analysis_page():
+    """analysis page"""
+    return redirect(url_for('insight_page'))
+
+
+@app.route('/insight')
+def insight_page():
+    """insight page"""
+    return render_template('insight.html')
+
+
+@app.route('/reports/<path:filename>')
+def reports_file(filename):
+    """serve generated reports"""
+    reports_dir = Path('reports').resolve()
+    return send_from_directory(reports_dir, filename)
+
+
+def _append_analysis_log(job_id: str, message, agent: str | None = None, status: str | None = None) -> None:
+    with ANALYSIS_LOCK:
+        job = ANALYSIS_JOBS.get(job_id)
+        if not job:
+            return
+        entry = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "message": "",
+            "agent": agent,
+            "status": status,
+        }
+        if isinstance(message, dict):
+            entry.update(message)
+        else:
+            entry["message"] = str(message)
+        job["log"].append(entry)
+        if entry.get("agent") and entry.get("status"):
+            agents = job.setdefault("agents", {})
+            agents[str(entry["agent"])] = str(entry["status"])
+        if len(job["log"]) > 300:
+            job["log"] = job["log"][-300:]
+        job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+
+def _normalize_chart_timeframes(raw) -> List[str]:
+    default = ["day", "week", "month", "year", "60m", "30m", "15m", "5m"]
+    if raw is None:
+        return default
+    items: List[str] = []
+    if isinstance(raw, list):
+        items = [str(item).strip().lower() for item in raw if str(item).strip()]
+    else:
+        items = [item.strip().lower() for item in str(raw).split(",") if item.strip()]
+    if not items:
+        return default
+
+    alias_map = {
+        "day": "day",
+        "daily": "day",
+        "d": "day",
+        "1d": "day",
+        "week": "week",
+        "weekly": "week",
+        "w": "week",
+        "1w": "week",
+        "month": "month",
+        "monthly": "month",
+        "mon": "month",
+        "1mon": "month",
+        "year": "year",
+        "yearly": "year",
+        "y": "year",
+        "1y": "year",
+        "60m": "60m",
+        "60": "60m",
+        "1h": "60m",
+        "30m": "30m",
+        "30": "30m",
+        "15m": "15m",
+        "15": "15m",
+        "5m": "5m",
+        "5": "5m",
+    }
+    normalized: List[str] = []
+    for item in items:
+        key = alias_map.get(item)
+        if key and key not in normalized:
+            normalized.append(key)
+    return normalized or default
+
+
+def _build_chart_output_dir(symbol: str, output_dir: str | None = None) -> Path:
+    base_dir = Path(output_dir).resolve() if output_dir else Path("reports") / symbol / "interactive"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    return base_dir
+
+
+def _attach_datetime_index(df):
+    import pandas as pd
+
+    df = df.copy()
+    if "date" not in df.columns:
+        return df
+    if "time" in df.columns:
+        time_str = df["time"].astype(str).str.zfill(6)
+        time_fmt = time_str.str.slice(0, 2) + ":" + time_str.str.slice(2, 4) + ":" + time_str.str.slice(4, 6)
+        dt_str = df["date"].dt.strftime("%Y-%m-%d") + " " + time_fmt
+        df["dt"] = pd.to_datetime(dt_str, format="%Y-%m-%d %H:%M:%S", errors="coerce")
+    else:
+        df["dt"] = df["date"]
+    df = df.dropna(subset=["dt"]).sort_values("dt").reset_index(drop=True)
+    return df
+
+
+def _add_kdj(df):
+    import pandas as pd
+    import numpy as np
+
+    df = df.copy()
+    low = pd.to_numeric(df["low"], errors="coerce")
+    high = pd.to_numeric(df["high"], errors="coerce")
+    close = pd.to_numeric(df["close"], errors="coerce")
+    low_n = low.rolling(window=9).min()
+    high_n = high.rolling(window=9).max()
+    denom = (high_n - low_n).replace(0, np.nan)
+    rsv = (close - low_n) / denom * 100
+    rsv = pd.to_numeric(rsv, errors="coerce")
+    k = rsv.ewm(alpha=1 / 3, adjust=False).mean()
+    d = k.ewm(alpha=1 / 3, adjust=False).mean()
+    j = 3 * k - 2 * d
+    df["kdj_k"] = k
+    df["kdj_d"] = d
+    df["kdj_j"] = j
+    return df
+
+
+def _resample_yearly(df):
+    df = df.copy()
+    if "date" not in df.columns:
+        return df
+    df = df.dropna(subset=["date"]).sort_values("date")
+    df["year"] = df["date"].dt.year
+    grouped = df.groupby("year", sort=True)
+    yearly = grouped.agg(
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+        volume=("volume", "sum"),
+        date=("date", "max"),
+    ).reset_index(drop=True)
+    yearly["dt"] = yearly["date"]
+    return yearly
+
+
+def _build_plotly_figure(df, symbol: str, title_suffix: str):
+    from plotly.subplots import make_subplots
+    import plotly.graph_objects as go
+
+    x = df["dt"]
+    up = df["close"] >= df["open"]
+    vol_colors = ["#ef5350" if flag else "#26a69a" for flag in up]
+    macd_colors = ["#ef5350" if val >= 0 else "#26a69a" for val in df["macd_hist"].fillna(0)]
+
+    fig = make_subplots(
+        rows=5,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.45, 0.15, 0.15, 0.12, 0.13],
+        specs=[[{"type": "candlestick"}], [{"type": "bar"}], [{"type": "xy"}], [{"type": "xy"}], [{"type": "xy"}]],
+    )
+
+    fig.add_trace(
+        go.Candlestick(
+            x=x,
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            name="Kline",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(go.Scatter(x=x, y=df["ma5"], name="MA5", line=dict(width=1)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=df["ma10"], name="MA10", line=dict(width=1)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=df["ma20"], name="MA20", line=dict(width=1)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=df["ma60"], name="MA60", line=dict(width=1)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=df["boll_upper"], name="BOLL U", line=dict(width=1, dash="dot")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=df["boll_mid"], name="BOLL M", line=dict(width=1, dash="dot")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x, y=df["boll_lower"], name="BOLL L", line=dict(width=1, dash="dot")), row=1, col=1)
+
+    fig.add_trace(go.Bar(x=x, y=df["volume"], name="Volume", marker_color=vol_colors), row=2, col=1)
+
+    fig.add_trace(go.Bar(x=x, y=df["macd_hist"], name="MACD Hist", marker_color=macd_colors), row=3, col=1)
+    fig.add_trace(go.Scatter(x=x, y=df["macd_diff"], name="MACD Diff", line=dict(width=1)), row=3, col=1)
+    fig.add_trace(go.Scatter(x=x, y=df["macd_dea"], name="MACD DEA", line=dict(width=1)), row=3, col=1)
+
+    fig.add_trace(go.Scatter(x=x, y=df["rsi14"], name="RSI14", line=dict(width=1)), row=4, col=1)
+
+    fig.add_trace(go.Scatter(x=x, y=df["kdj_k"], name="K", line=dict(width=1)), row=5, col=1)
+    fig.add_trace(go.Scatter(x=x, y=df["kdj_d"], name="D", line=dict(width=1)), row=5, col=1)
+    fig.add_trace(go.Scatter(x=x, y=df["kdj_j"], name="J", line=dict(width=1)), row=5, col=1)
+
+    fig.update_layout(
+        title=f"{symbol} {title_suffix} Kline",
+        template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=900,
+        margin=dict(l=40, r=20, t=60, b=40),
+        xaxis_rangeslider_visible=False,
+        dragmode="pan",
+    )
+    return fig
+
+
+def _generate_interactive_charts(symbol: str, timeframes: List[str], output_dir: str | None = None) -> Dict[str, Any]:
+    from finance_tools.aitrados_client import FinanceMCPClient
+
+    timeframe_map = {
+        "day": "DAY",
+        "week": "WEEK",
+        "month": "MON",
+        "60m": "60m",
+        "30m": "30m",
+        "15m": "15m",
+        "5m": "5m",
+    }
+    label_map = {
+        "day": "Daily",
+        "week": "Weekly",
+        "month": "Monthly",
+        "year": "Yearly",
+        "60m": "60m",
+        "30m": "30m",
+        "15m": "15m",
+        "5m": "5m",
+    }
+
+    client = FinanceMCPClient(debug=False)
+    start_date = "1990-01-01"
+    end_date = datetime.today().strftime("%Y-%m-%d")
+    base_dir = _build_chart_output_dir(symbol, output_dir)
+    urls: Dict[str, str] = {}
+    errors: Dict[str, str] = {}
+
+    for tf_key in timeframes:
+        file_path = base_dir / f"{symbol}_{tf_key}.html"
+        try:
+            if tf_key == "year":
+                ohlc = client.get_ohlc(
+                    symbol=symbol,
+                    timeframe="MON",
+                    limit=0,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                df = client._ohlc_dict_to_df(ohlc)
+                df = _resample_yearly(df)
+                df = _attach_datetime_index(df)
+            else:
+                basic_fields = tf_key == "day"
+                ohlc = client.get_ohlc(
+                    symbol=symbol,
+                    timeframe=timeframe_map[tf_key],
+                    limit=0,
+                    start_date=start_date,
+                    end_date=end_date,
+                    basic_fields=basic_fields,
+                )
+                df = client._ohlc_dict_to_df(ohlc)
+                df = _attach_datetime_index(df)
+
+            if df.empty:
+                raise RuntimeError("empty OHLC data")
+
+            ind_df = client._compute_indicators_from_df(df)
+            if "dt" in df.columns:
+                ind_df["dt"] = df["dt"].values
+            ind_df = _add_kdj(ind_df)
+
+            fig = _build_plotly_figure(ind_df, symbol, label_map.get(tf_key, tf_key))
+            html = fig.to_html(include_plotlyjs="cdn", full_html=True)
+
+            file_path.write_text(html, encoding="utf-8")
+            urls[tf_key] = f"/reports/{symbol}/interactive/{file_path.name}"
+        except Exception as exc:
+            errors[tf_key] = str(exc)
+            if file_path.exists() and tf_key not in urls:
+                urls[tf_key] = f"/reports/{symbol}/interactive/{file_path.name}"
+
+    return {"urls": urls, "errors": errors}
+
+
+def _read_json_file(path: Path) -> Any:
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _flatten_payload(obj: Any, prefix: str, rows: List[Dict[str, Any]], symbol: str) -> None:
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            next_prefix = f"{prefix}.{key}" if prefix else str(key)
+            _flatten_payload(value, next_prefix, rows, symbol)
+    elif isinstance(obj, list):
+        for idx, value in enumerate(obj):
+            next_prefix = f"{prefix}[{idx}]"
+            _flatten_payload(value, next_prefix, rows, symbol)
+    else:
+        rows.append({
+            "section": "fund",
+            "symbol": symbol,
+            "path": prefix,
+            "value": obj,
+        })
+
+
+def _normalize_csv_value(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return ", ".join([str(v) for v in value if v is not None])
+    return value
+
+
+def _collect_csv_fieldnames(rows: List[Dict[str, Any]]) -> List[str]:
+    preferred = [
+        "section",
+        "symbol",
+        "timeframe",
+        "date",
+        "dt",
+        "time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "ma5",
+        "ma10",
+        "ma20",
+        "ma60",
+        "macd_diff",
+        "macd_dea",
+        "macd_hist",
+        "rsi14",
+        "boll_mid",
+        "boll_upper",
+        "boll_lower",
+        "platform",
+        "published_at",
+        "title",
+        "content",
+        "snippet",
+        "url",
+        "author",
+        "match_count",
+        "engagement",
+        "score",
+        "keyword",
+        "source_table",
+        "time_source",
+        "media_urls",
+        "path",
+        "value",
+        "keywords",
+        "db_error",
+    ]
+    fieldnames = []
+    seen = set()
+    for key in preferred:
+        if key not in seen:
+            fieldnames.append(key)
+            seen.add(key)
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                fieldnames.append(key)
+                seen.add(key)
+    return fieldnames
+
+
+def _rows_to_csv(rows: List[Dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    fieldnames = _collect_csv_fieldnames(rows)
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        normalized = {k: _normalize_csv_value(v) for k, v in row.items()}
+        writer.writerow(normalized)
+    return output.getvalue()
+
+
+def _rows_to_dataframe(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    fieldnames = _collect_csv_fieldnames(rows)
+    normalized_rows = [{k: _normalize_csv_value(v) for k, v in row.items()} for row in rows]
+    df = pd.DataFrame(normalized_rows)
+    for col in fieldnames:
+        if col not in df.columns:
+            df[col] = ""
+    return df[fieldnames]
+
+
+def _run_analysis_job(job_id: str, payload: Dict[str, Any]) -> None:
+    try:
+        action = (payload.get("action") or "analysis").lower()
+        report_modes = payload.get("report_modes")
+        run_reports = action != "crawler"
+        modes_list: List[str] = []
+        if report_modes:
+            if isinstance(report_modes, list):
+                modes_list = [str(item).strip().lower() for item in report_modes if str(item).strip()]
+            else:
+                modes_list = [m.strip().lower() for m in str(report_modes).split(",") if m.strip()]
+        else:
+            modes_list = [str(payload.get("report_mode", "combined")).strip().lower()]
+        if run_reports:
+            run_combined = "combined" in modes_list
+            run_tech = "tech" in modes_list or run_combined
+            run_fund = "fund" in modes_list or run_combined
+            run_news = "news" in modes_list or run_combined
+            run_orchestrator = True
+            run_critic = run_combined or sum([run_tech, run_fund, run_news]) >= 2
+            agent_status = {
+                "orchestrator": "pending" if run_orchestrator else "disabled",
+                "tech": "pending" if run_tech else "disabled",
+                "fund": "pending" if run_fund else "disabled",
+                "news": "pending" if run_news else "disabled",
+                "critic": "pending" if run_critic else "disabled",
+                "combined": "pending" if run_combined else "disabled",
+            }
+        else:
+            agent_status = {
+                "orchestrator": "disabled",
+                "tech": "disabled",
+                "fund": "disabled",
+                "news": "disabled",
+                "critic": "disabled",
+                "combined": "disabled",
+            }
+        with ANALYSIS_LOCK:
+            job = ANALYSIS_JOBS.get(job_id, {})
+            job["agents"] = agent_status
+            ANALYSIS_JOBS[job_id] = job
+        mindspider_keywords = payload.get("mindspider_keywords")
+        guba_keywords = payload.get("guba_keywords") or mindspider_keywords
+        symbols = payload.get("symbols")
+        if isinstance(symbols, list) and len(symbols) > 1:
+            results = []
+            for item in symbols:
+                sym = str(item.get("symbol") or "").strip()
+                if not sym:
+                    continue
+                res = run_pipeline(
+                    symbol=sym,
+                    report_mode=payload.get("report_mode", "combined"),
+                    report_modes=report_modes,
+                    stock_name=item.get("name") or payload.get("stock_name"),
+                    news_days=payload.get("news_days", 7),
+                    use_bocha=payload.get("use_bocha", False),
+                    include_realtime=payload.get("include_realtime", True),
+                    output_dir=payload.get("output_dir"),
+                    env_overrides=payload.get("env_overrides"),
+                    db_overrides=payload.get("db_overrides"),
+                    agent_overrides=payload.get("agent_overrides"),
+                    crawl_mindspider=payload.get("crawl_mindspider", False),
+                    mindspider_platforms=payload.get("mindspider_platforms"),
+                    mindspider_days=payload.get("mindspider_days", 1),
+                    mindspider_max_notes=payload.get("mindspider_max_notes", 10),
+                    mindspider_dir=payload.get("mindspider_dir"),
+                    mindspider_keywords=mindspider_keywords,
+                    mindspider_no_crawl=payload.get("mindspider_no_crawl", False),
+                    crawl_guba=payload.get("crawl_guba", False),
+                    guba_keywords=guba_keywords,
+                    guba_dir=payload.get("guba_dir"),
+                    guba_pages=payload.get("guba_pages", 10),
+                    guba_fulltext=payload.get("guba_fulltext", False),
+                    guba_fulltext_days=payload.get("guba_fulltext_days", 7),
+                    guba_fulltext_limit=payload.get("guba_fulltext_limit", 200),
+                    guba_init_schema=payload.get("guba_init_schema", False),
+                    run_reports=run_reports,
+                    log=lambda msg: _append_analysis_log(job_id, msg),
+                )
+                report_urls = res.get("report_urls") or {}
+                results.append({
+                    "symbol": sym,
+                    "name": item.get("name") or "",
+                    "report_urls": report_urls,
+                    "selected_url": res.get("selected_url") or "",
+                    "report_dir": res.get("report_dir") or "",
+                })
+
+            if run_reports:
+                output_dir = payload.get("output_dir") or "reports"
+                enriched = []
+                for item in results:
+                    symbol = item.get("symbol") or ""
+                    report_dir = Path(item.get("report_dir") or Path(output_dir) / symbol)
+                    overview_path = report_dir / "materials" / f"{symbol}_overview.json"
+                    overview_md = ""
+                    if overview_path.exists():
+                        try:
+                            overview_md = json.loads(overview_path.read_text(encoding="utf-8")).get("overview_md") or ""
+                        except Exception:
+                            overview_md = ""
+                    if not overview_md:
+                        report_urls = item.get("report_urls") or {}
+                        fallback_md = _load_brief_md(report_dir, symbol, report_urls)
+                        if fallback_md:
+                            overview_md = fallback_md
+                    item["overview_md"] = overview_md
+                    enriched.append(item)
+
+                query = payload.get("symbol_query") or payload.get("symbol") or ""
+                multi_path = _build_multi_stock_report(enriched, output_dir, job_id, query)
+                root = Path.cwd()
+                rel = os.path.relpath(multi_path, start=root).replace("\\", "/")
+                url = "/" + rel.lstrip("/")
+                result = {
+                    "action": "analysis",
+                    "report_mode": "multi",
+                    "report_modes": ["multi"],
+                    "report_paths": {"multi": multi_path},
+                    "report_urls": {"multi": url},
+                    "selected_url": url,
+                    "report_dir": str(Path(output_dir) / "multi" / job_id),
+                    "symbols": [r.get("symbol") for r in results],
+                }
+            else:
+                output_dir = payload.get("output_dir") or "reports"
+                result = {
+                    "action": "crawler",
+                    "report_mode": "crawler",
+                    "report_modes": [],
+                    "report_paths": {},
+                    "report_urls": {},
+                    "selected_url": "",
+                    "report_dir": str(Path(output_dir)),
+                    "symbols": [r.get("symbol") for r in results],
+                    "results": results,
+                }
+        else:
+            result = run_pipeline(
+                symbol=payload["symbol"],
+                report_mode=payload.get("report_mode", "combined"),
+                report_modes=report_modes,
+                stock_name=payload.get("stock_name"),
+                news_days=payload.get("news_days", 7),
+                use_bocha=payload.get("use_bocha", False),
+                include_realtime=payload.get("include_realtime", True),
+                output_dir=payload.get("output_dir"),
+                env_overrides=payload.get("env_overrides"),
+                db_overrides=payload.get("db_overrides"),
+                agent_overrides=payload.get("agent_overrides"),
+                crawl_mindspider=payload.get("crawl_mindspider", False),
+                mindspider_platforms=payload.get("mindspider_platforms"),
+                mindspider_days=payload.get("mindspider_days", 1),
+                mindspider_max_notes=payload.get("mindspider_max_notes", 10),
+                mindspider_dir=payload.get("mindspider_dir"),
+                mindspider_keywords=mindspider_keywords,
+                mindspider_no_crawl=payload.get("mindspider_no_crawl", False),
+                crawl_guba=payload.get("crawl_guba", False),
+                guba_keywords=guba_keywords,
+                guba_dir=payload.get("guba_dir"),
+                guba_pages=payload.get("guba_pages", 10),
+                guba_fulltext=payload.get("guba_fulltext", False),
+                guba_fulltext_days=payload.get("guba_fulltext_days", 7),
+                guba_fulltext_limit=payload.get("guba_fulltext_limit", 200),
+                guba_init_schema=payload.get("guba_init_schema", False),
+                run_reports=run_reports,
+                log=lambda msg: _append_analysis_log(job_id, msg),
+            )
+        with ANALYSIS_LOCK:
+            job = ANALYSIS_JOBS.get(job_id, {})
+            job["status"] = "done"
+            job["result"] = result
+            job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            ANALYSIS_JOBS[job_id] = job
+    except Exception as exc:
+        with ANALYSIS_LOCK:
+            job = ANALYSIS_JOBS.get(job_id, {})
+            job["status"] = "error"
+            job["error"] = str(exc)
+            job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            ANALYSIS_JOBS[job_id] = job
+
+
+@app.route('/api/analysis/run', methods=['POST'])
+def run_analysis_api():
+    payload = request.get_json(silent=True) or {}
+    symbol_query = str(payload.get("symbol", "")).strip()
+    if not symbol_query:
+        return jsonify({"success": False, "message": "symbol required"}), 400
+    action = str(payload.get("action", "analysis")).lower()
+    if action not in ("analysis", "crawler"):
+        return jsonify({"success": False, "message": "invalid action"}), 400
+    if action == "analysis":
+        report_modes = payload.get("report_modes")
+        if isinstance(report_modes, list):
+            if not any(str(item).strip() for item in report_modes):
+                return jsonify({"success": False, "message": "select at least one report mode"}), 400
+        elif report_modes is not None and not str(report_modes).strip():
+            return jsonify({"success": False, "message": "select at least one report mode"}), 400
+    else:
+        if not payload.get("crawl_mindspider") and not payload.get("crawl_guba"):
+            return jsonify({"success": False, "message": "select at least one crawler"}), 400
+
+    job_id = uuid.uuid4().hex
+    with ANALYSIS_LOCK:
+        ANALYSIS_JOBS[job_id] = {
+            "status": "running",
+            "log": [],
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    resolved = _resolve_symbols_from_query(symbol_query)
+    if not resolved:
+        return jsonify({"success": False, "message": "symbol not recognized"}), 400
+    if len(resolved) == 1:
+        payload["symbol"] = resolved[0].get("symbol") or symbol_query
+        if not payload.get("stock_name") and resolved[0].get("name"):
+            payload["stock_name"] = resolved[0]["name"]
+    else:
+        payload["symbols"] = resolved
+        payload["symbol_query"] = symbol_query
+        payload["symbol"] = resolved[0].get("symbol") or symbol_query
+    payload["action"] = action
+    thread = threading.Thread(target=_run_analysis_job, args=(job_id, payload), daemon=True)
+    thread.start()
+
+    return jsonify({"success": True, "job_id": job_id})
+
+
+@app.route('/api/analysis/status/<job_id>')
+def analysis_status(job_id):
+    with ANALYSIS_LOCK:
+        job = ANALYSIS_JOBS.get(job_id)
+        if not job:
+            return jsonify({"success": False, "message": "job not found"}), 404
+        return jsonify({"success": True, "job": job})
+
+
+@app.route('/api/symbols/resolve')
+def resolve_symbols():
+    query = str(request.args.get("query", "")).strip()
+    if not query:
+        return jsonify({"success": False, "message": "query required"}), 400
+    resolved = _resolve_symbols_from_query(query)
+    if not resolved:
+        return jsonify({"success": False, "message": "symbol not recognized"}), 404
+    return jsonify({"success": True, "symbols": resolved})
+
+
+@app.route('/api/market/charts', methods=['POST'])
+def market_charts():
+    payload = request.get_json(silent=True) or {}
+    symbol = str(payload.get("symbol", "")).strip()
+    if not symbol:
+        return jsonify({"success": False, "message": "symbol required"}), 400
+
+    timeframes = _normalize_chart_timeframes(payload.get("timeframes"))
+    output_dir = payload.get("output_dir")
+
+    result = _generate_interactive_charts(symbol=symbol, timeframes=timeframes, output_dir=output_dir)
+    urls = result.get("urls", {})
+    errors = result.get("errors", {})
+
+    if not urls and errors:
+        return jsonify({"success": False, "message": "no charts generated", "errors": errors}), 500
+
+    return jsonify({
+        "success": True,
+        "symbol": symbol,
+        "timeframes": timeframes,
+        "urls": urls,
+        "errors": errors,
+    })
+
+
+@app.route('/api/export/csv')
+def export_csv():
+    symbol_query = str(request.args.get("symbol", "")).strip()
+    if not symbol_query:
+        return jsonify({"success": False, "message": "symbol required"}), 400
+
+    def _collect_rows_for_symbol(symbol: str) -> List[Dict[str, Any]]:
+        materials_dir = Path("reports") / symbol / "materials"
+        if not materials_dir.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+
+        tech_payload = _read_json_file(materials_dir / f"{symbol}_tech_data.json")
+        if isinstance(tech_payload, dict):
+            for timeframe, records in tech_payload.items():
+                if not isinstance(records, list):
+                    continue
+                for rec in records:
+                    if not isinstance(rec, dict):
+                        continue
+                    row = {"section": "tech", "symbol": symbol, "timeframe": timeframe}
+                    row.update(rec)
+                    rows.append(row)
+
+        fundamentals_payload = _read_json_file(materials_dir / f"{symbol}_fundamentals_payload.json")
+        if isinstance(fundamentals_payload, dict):
+            _flatten_payload(fundamentals_payload, "", rows, symbol)
+
+        message_items = _read_json_file(materials_dir / f"{symbol}_message_items.json")
+        if isinstance(message_items, list):
+            for item in message_items:
+                if not isinstance(item, dict):
+                    continue
+                rows.append({
+                    "section": "news_db",
+                    "symbol": symbol,
+                    "platform": item.get("platform", ""),
+                    "published_at": item.get("published_at", ""),
+                    "title": item.get("title", ""),
+                    "content": item.get("content", ""),
+                    "url": item.get("url", ""),
+                    "author": item.get("author", ""),
+                    "keyword": item.get("keyword", ""),
+                    "engagement": item.get("engagement", ""),
+                    "match_count": item.get("match_count", ""),
+                    "score": item.get("score", ""),
+                    "source_table": item.get("source_table", ""),
+                    "time_source": item.get("time_source", ""),
+                    "media_urls": item.get("media_urls", ""),
+                })
+
+        web_items = _read_json_file(materials_dir / f"{symbol}_message_web_items.json")
+        if isinstance(web_items, list):
+            for item in web_items:
+                if not isinstance(item, dict):
+                    continue
+                rows.append({
+                    "section": "news_web",
+                    "symbol": symbol,
+                    "title": item.get("title", ""),
+                    "snippet": item.get("snippet", ""),
+                    "url": item.get("url", ""),
+                })
+
+        keyword_info = _read_json_file(materials_dir / f"{symbol}_message_keywords.json")
+        if isinstance(keyword_info, dict):
+            rows.append({
+                "section": "news_keywords",
+                "symbol": symbol,
+                "keywords": ", ".join(keyword_info.get("keywords") or []),
+                "db_error": keyword_info.get("db_error") or "",
+            })
+
+        return rows
+
+    resolved = _resolve_symbols_from_query(symbol_query)
+    if not resolved:
+        fallback_symbol = symbol_query
+        if not (Path("reports") / fallback_symbol).exists():
+            return jsonify({"success": False, "message": "symbol not recognized"}), 400
+        resolved = [{"symbol": fallback_symbol, "name": ""}]
+
+    symbols = [item.get("symbol") for item in resolved if item.get("symbol")]
+    if not symbols:
+        return jsonify({"success": False, "message": "symbol not recognized"}), 400
+
+    if len(symbols) == 1:
+        symbol = symbols[0]
+        rows = _collect_rows_for_symbol(symbol)
+        if not rows:
+            return jsonify({"success": False, "message": "no materials found"}), 404
+        csv_text = _rows_to_csv(rows)
+        data = csv_text.encode("utf-8-sig")
+        filename = f"{symbol}_all_data.csv"
+        return Response(
+            data,
+            mimetype="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+
+    data_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+    for symbol in symbols:
+        data_by_symbol[symbol] = _collect_rows_for_symbol(symbol)
+
+    if not any(data_by_symbol.values()):
+        return jsonify({"success": False, "message": "no materials found"}), 404
+
+    engine = None
+    try:
+        import openpyxl  # noqa: F401
+        engine = "openpyxl"
+    except Exception:
+        try:
+            import xlsxwriter  # noqa: F401
+            engine = "xlsxwriter"
+        except Exception:
+            return jsonify({"success": False, "message": "openpyxl or xlsxwriter required for multi export"}), 500
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine=engine) as writer:
+        for symbol, rows in data_by_symbol.items():
+            df = _rows_to_dataframe(rows)
+            if df.empty:
+                df = pd.DataFrame(columns=_collect_csv_fieldnames(rows) or ["section", "symbol"])
+            df.to_excel(writer, sheet_name=str(symbol)[:31], index=False)
+    output.seek(0)
+
+    filename = "analysis_multi.xlsx"
+    return Response(
+        output.getvalue(),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.route('/api/export/pdf')
+def export_pdf():
+    symbol_query = str(request.args.get("symbol", "")).strip()
+    if not symbol_query:
+        return jsonify({"success": False, "message": "symbol required"}), 400
+
+    resolved = _resolve_symbols_from_query(symbol_query)
+    if not resolved:
+        fallback_symbol = symbol_query
+        if not (Path("reports") / fallback_symbol).exists():
+            return jsonify({"success": False, "message": "symbol not recognized"}), 400
+        resolved = [{"symbol": fallback_symbol, "name": ""}]
+
+    symbols = [item.get("symbol") for item in resolved if item.get("symbol")]
+    if not symbols:
+        return jsonify({"success": False, "message": "symbol not recognized"}), 400
+    if len(symbols) != 1:
+        return jsonify({"success": False, "message": "single symbol required"}), 400
+
+    symbol = symbols[0]
+    report_dir = Path("reports") / symbol
+    if not report_dir.exists():
+        return jsonify({"success": False, "message": "report not found"}), 404
+
+    candidates = [
+        report_dir / f"{symbol}_report.pdf",
+        report_dir / "report.pdf",
+        report_dir / f"{symbol}.pdf",
+        report_dir / "combined.pdf",
+    ]
+    for path in candidates:
+        if path.exists():
+            return send_from_directory(
+                report_dir,
+                path.name,
+                as_attachment=True,
+                download_name=path.name,
+                mimetype="application/pdf",
+            )
+
+    pdfs = sorted(report_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if pdfs:
+        path = pdfs[0]
+        return send_from_directory(
+            report_dir,
+            path.name,
+            as_attachment=True,
+            download_name=path.name,
+            mimetype="application/pdf",
+        )
+
+    return jsonify({"success": False, "message": "pdf not found"}), 404
+
+
+@app.route('/api/evidence/<symbol>')
+def get_evidence(symbol: str):
+    symbol = str(symbol or "").strip()
+    if not symbol:
+        return jsonify({"success": False, "message": "symbol required"}), 400
+    materials_dir = Path("reports") / symbol / "materials"
+    evidence = _read_json_file(materials_dir / f"{symbol}_evidence.json")
+    if not isinstance(evidence, list):
+        return jsonify({"success": False, "message": "no evidence found"}), 404
+    return jsonify({"success": True, "symbol": symbol, "items": evidence})
+
 
 @app.route('/api/status')
 def get_status():
@@ -924,11 +2059,13 @@ def search():
     
     # 向运行中的应用发送搜索请求
     results = {}
-    api_ports = {'insight': 8601, 'media': 8602, 'query': 8603}
+    api_ports = {'insight': 8601}
     
     for app_name in running_apps:
         try:
-            api_port = api_ports[app_name]
+            api_port = api_ports.get(app_name)
+            if not api_port:
+                continue
             # 调用Streamlit应用的API端点
             response = requests.post(
                 f"http://localhost:{api_port}/api/search",

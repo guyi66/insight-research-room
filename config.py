@@ -30,12 +30,12 @@ class Settings(BaseSettings):
     PORT: int = Field(5000, description="Flask服务器端口号，默认5000")
 
     # ====================== 数据库配置 ======================
-    DB_DIALECT: str = Field("postgresql", description="数据库类型，可选 mysql 或 postgresql；请与其他连接信息同时配置")
-    DB_HOST: str = Field("your_db_host", description="数据库主机，例如localhost 或 127.0.0.1")
+    DB_DIALECT: str = Field("mysql", description="数据库类型，可选 mysql 或 postgresql；请与其他连接信息同时配置")
+    DB_HOST: str = Field("localhost", description="数据库主机，例如localhost 或 127.0.0.1")
     DB_PORT: int = Field(3306, description="数据库端口号，默认为3306")
-    DB_USER: str = Field("your_db_user", description="数据库用户名")
-    DB_PASSWORD: str = Field("your_db_password", description="数据库密码")
-    DB_NAME: str = Field("your_db_name", description="数据库名称")
+    DB_USER: str = Field("root", description="数据库用户名")
+    DB_PASSWORD: str = Field("root", description="数据库密码")
+    DB_NAME: str = Field("bettafish_guba", description="数据库名称")
     DB_CHARSET: str = Field("utf8mb4", description="数据库字符集，推荐utf8mb4，兼容emoji")
     
     # ======================= LLM 相关 =======================
@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     
     # Bocha API（申请地址：https://open.bochaai.com/）
     BOCHA_BASE_URL: Optional[str] = Field("https://api.bochaai.com/v1/ai-search", description="Bocha AI 搜索BaseUrl或博查网页搜索BaseUrl")
-    BOCHA_WEB_SEARCH_API_KEY: Optional[str] = Field(None, description="Bocha API（申请地址：https://open.bochaai.com/）API密钥，用于Bocha搜索")
+    BOCHA_WEB_SEARCH_API_KEY: Optional[str] = Field("sk-63f66079348c457ca51c63d964d73034", description="Bocha API（申请地址：https://open.bochaai.com/）API密钥，用于Bocha搜索")
     
     # ================== Insight Engine 搜索配置 ====================
     DEFAULT_SEARCH_HOT_CONTENT_LIMIT: int = Field(100, description="热榜内容默认最大数")
@@ -101,7 +101,8 @@ class Settings(BaseSettings):
         env_file=ENV_FILE,
         env_prefix="",
         case_sensitive=False,
-        extra="allow"
+        env_ignore_empty=True,
+        extra="allow",
     )
 
 

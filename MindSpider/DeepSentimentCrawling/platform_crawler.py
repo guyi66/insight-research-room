@@ -155,7 +155,7 @@ postgresql_db_config = {{
             db_dialect = (config.settings.DB_DIALECT or "mysql").lower()
             is_postgresql = db_dialect in ("postgresql", "postgres")
             save_data_option = "postgresql" if is_postgresql else "db"
-            
+
             base_config_path = self.mediacrawler_path / "config" / "base_config.py"
             
             # 将关键词列表转换为逗号分隔的字符串
